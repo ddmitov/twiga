@@ -1,0 +1,9 @@
+**/__pycache__
+**/assets
+**/data
+
+**/backup
+**/upgit
+
+**/*.md
+**/*.toml
