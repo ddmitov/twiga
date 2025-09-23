@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 # Core modules:
-import json
 import os
 import signal
 import threading
@@ -30,15 +29,65 @@ from twiga_text import twiga_text_reader
 # Global variable for scale-to-zero capability after a period of inactivity:
 last_activity = None
 
-# Global variable for stopwords:
-stopword_set = None
-
 # Global variables for DuckDB connections:
 duckdb_index_connection = None
 duckdb_text_connection  = None
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
+
+# Stopwords:
+stopwords_bg_set = set(
+    [
+        'а', 'ако', 'ала', 'бе', 'без', 'беше', 'би', 'бил', 'била',
+        'били', 'било', 'близо', 'бъдат', 'бъде', 'бяха', 'в', 'вас',
+        'ваш', 'ваша', 'вече', 'ви', 'вие', 'все', 'всеки', 'всички',
+        'всичко', 'всяка', 'във', 'въпреки', 'върху', 'г', 'ги', 'го',
+        'дали', 'до', 'докато', 'докога', 'дори', 'досега', 'доста',
+        'друг', 'друга', 'други', 'е', 'едва', 'ето', 'за', 'зад',
+        'заедно', 'заради', 'засега', 'затова', 'защо', 'защото', 'и',
+        'из', 'или', 'им', 'има', 'имат', 'иска', 'й', 'как', 'каква',
+        'какво', 'както', 'какъв', 'като', 'кога', 'когато', 'което',
+        'които', 'кой', 'който', 'колко', 'която', 'къде', 'където',
+        'към', 'ли', 'м', 'ме', 'между', 'мен', 'ми', 'му', 'н', 'на',
+        'над',  'най', 'например', 'нас', 'него', 'нещо', 'нея',
+        'ни', 'ние', 'никой', 'нито', 'нищо', 'но', 'някои', 'някой',
+        'няколко', 'няма', 'обаче', 'около', 'освен', 'особено', 'от',
+        'отгоре', 'отново', 'още', 'пак', 'по', 'повече', 'повечето',
+        'под', 'поне', 'поради', 'после', 'почти', 'пред', 'преди',
+        'през', 'при', 'пък', 'пъти', 'с', 'са', 'само', 'се', 'сега',
+        'си', 'скоро', 'след', 'сме', 'според', 'сред', 'срещу', 'сте',
+        'съм', 'със', 'също', 'т', 'тази', 'така', 'такива', 'такъв',
+        'там', 'те', 'тези', 'ти', 'то', 'това', 'тогава', 'този', 'той',
+        'толкова', 'точно', 'тук', 'тъй', 'тя', 'тях', 'у', 'ч', 'часа',
+        'че', 'чрез', 'ще', 'щом', 'я'
+    ]
+)
+
+stopwords_en_set = set(
+    [
+        'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am',
+        'an', 'and', 'any', 'are', 'aren', 'as', 'at', 'be', 'because',
+        'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
+        'can', 'cannot', 'could', 'couldn', 'did', 'didn', 'do', 'does',
+        'doesn', 'doing', 'don', 'down', 'during', 'each', 'few', 'for',
+        'from', 'further', 'had', 'hadn', 'has', 'hasn', 'have', 'having',
+        'he', 'he', 'her', 'here', 'hers', 'herself', 'him', 'himself',
+        'his', 'how', 'how', 'i', 'if', 'in', 'into', 'is', 'isn', 'it',
+        'its', 'itself', 'll', 'me', 'more', 'most', 'mustn', 'my',
+        'myself', 'nor', 'not', 'of', 'off', 'on', 'once', 'only', 'or',
+        'other', 'ought', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+        're', 'same', 'shan', 'she', 'should', 'shouldn', 'so', 'some',
+        'such', 'than', 'that', 'the', 'their', 'theirs', 'them',
+        'themselves', 'then', 'there', 'these', 'they', 'this', 'those',
+        'through', 't', 'to', 'too', 'under', 'until', 'up', 've', 'very',
+        'was', 'wasn', 'we', 'were', 'weren', 'what', 'when', 'where',
+        'which', 'while', 'who', 'whom', 'why', 'with', 'won', 'would',
+        'wouldn', 'you', 'your', 'yours', 'yourself', 'yourselves'
+    ]
+)
+
+stopword_set = stopwords_bg_set | stopwords_en_set
 
 
 def text_searcher(
@@ -49,11 +98,10 @@ def text_searcher(
     global last_activity
     last_activity = time.time()
 
-    # Use the global stopwords set:
     global stopword_set
 
     # Hash the search request:
-    hash_list = twiga_request_hasher(stopword_set, search_request)
+    hash_list = twiga_request_hasher(search_request, stopword_set)
 
     # Read the hashed words index data:
     index_reading_start = time.time()
@@ -175,32 +223,21 @@ def main():
     # Disable Gradio telemetry:
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
 
-    # Initialize a stopwords list:
-    global stopword_set
-
-    with open('/home/twiga/stopwords-iso.json', 'r') as stopwords_json_file:
-        stopword_json_data = json.load(stopwords_json_file)
-
-        stopwords_bg = set(stopword_json_data['bg'])
-        stopwords_en = set(stopword_json_data['en'])
-
-        stopword_set = stopwords_bg | stopwords_en
-
     # Initialize DuckDB connections:
     global duckdb_index_connection
-    duckdb_index_connection = duckdb.connect('/app/data/twiga_index.db')
+    duckdb_index_connection = duckdb.connect('/app/data/twiga_index.duckdb')
 
     global duckdb_text_connection
-    duckdb_text_connection = duckdb.connect('/app/data/twiga_texts.db')
+    duckdb_text_connection = duckdb.connect('/app/data/twiga_texts.duckdb')
 
     # Get the total number of texts in the index:
     statistics_table = duckdb_index_connection.query(
-        '''
+        """
             SELECT
                 COUNT(text_id)   AS texts_total,
                 SUM(words_total) AS words_total
             FROM word_counts
-        '''
+        """
     ).arrow()
 
     texts_total = statistics_table.column('texts_total')[0].as_py()

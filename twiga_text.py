@@ -5,36 +5,40 @@ import pyarrow as pa
 
 
 def twiga_text_writer(
-    duckdb_text_connection: object,
-    bins_total:             int,
-    batch_table:            pa.Table
+    duckdb_connection: object,
+    bins_total:        int,
+    batch_table:       pa.Table
 ) -> True:
-    batch_table = duckdb_text_connection.sql(
-        f'''
+    batch_table = duckdb_connection.sql(
+        f"""
             SELECT
                 *,
                 ((text_id % {str(bins_total)}) + 1) AS bin
             FROM batch_table
-        '''
+        """
     ).arrow()
 
+    duckdb_connection.execute("BEGIN TRANSACTION")
+
     for bin_number in range(1, bins_total + 1):
-        duckdb_text_connection.execute(
-            f'''
-                INSERT INTO texts_bin_{str(bin_number)}
+        duckdb_connection.execute(
+            f"""
+                INSERT INTO text.texts_bin_{str(bin_number)}
                 SELECT * EXCLUDE (bin),
                 FROM batch_table
                 WHERE bin = {str(bin_number)}
-            '''
+            """
         )
+
+    duckdb_connection.execute("COMMIT")
 
     return True
 
 
 def twiga_text_reader(
-    duckdb_text_connection: object,
-    bins_total:             int,
-    text_id_table:          pa.Table
+    duckdb_connection: object,
+    bins_total:        int,
+    text_id_table:     pa.Table
 ) -> None | pa.Table:
     text_id_list = text_id_table.column('text_id').to_pylist()
 
@@ -56,19 +60,19 @@ def twiga_text_reader(
 
         text_id_string = ', '.join(map(str, set(bin_text_id_list)))
 
-        text_query += f'''
+        text_query += f"""
             SELECT *
             FROM texts_bin_{str(bin_number)}
             WHERE text_id IN ({text_id_string})
-        '''
+        """
 
         if query_number < len(bin_dict):
             text_query += 'UNION'
 
-    text_table = duckdb_text_connection.sql(text_query).arrow()
+    text_table = duckdb_connection.sql(text_query).arrow()
 
-    search_result_table = duckdb_text_connection.query(
-        '''
+    search_result_table = duckdb_connection.query(
+        """
             SELECT
                 tit.matching_words,
                 tit.words_total AS total_words,
@@ -80,7 +84,7 @@ def twiga_text_reader(
                 LEFT JOIN text_table AS tt
                     ON tt.text_id = tit.text_id
             ORDER BY tit.matching_words_frequency DESC
-        '''
+        """
     ).arrow()
 
     if search_result_table.num_rows == 0:

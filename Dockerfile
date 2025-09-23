@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 # Twiga dependencies:
 RUN pip install --no-cache \
+    numpy                  \
     duckdb                 \
     pyarrow                \
     tokenizers
@@ -13,12 +14,7 @@ RUN pip install --no-cache \
     pandas                 \
     python-dotenv
 
-RUN apt-get update && apt-get install -y curl
-
 RUN mkdir /home/twiga
-
-RUN curl -o /home/twiga/stopwords-iso.json \
-    https://raw.githubusercontent.com/stopwords-iso/stopwords-iso/master/stopwords-iso.json
 
 # Twiga files:
 COPY ./twiga_core.py   /home/twiga/twiga_core.py
