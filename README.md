@@ -10,28 +10,26 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 * **1.** Fast subsecond lexical search
 * **2.** Fast indexing of large number of texts
-* **3.** Index data based entirely in standard SQL tables
+* **3.** Index data stored entirely in standard SQL tables
 * **4.** Usability in a variety of SQL-driven systems
 
 ## Features
 
-- [x] Index data is stored only in ordinary SQL tables.
+- [x] Index data is stored only in standard SQL tables.
 
 - [x] Twiga is language-agnostic, different languages can coexist in a single index.
 
-- [x] The index and text locations are independent from one another, texts may live in a different system.
+- [x] Index and text locations are independent from one another, texts may live in a different system.
 
 ## Workflow
 
-- [x] Texts are split to words using a normalizer and a pre-tokenizer from the Tokenizers Python module.
+- Texts are split into words using a normalizer and a pre-tokenizer from the Tokenizers Python module.
 
-- [x] Words are hashed and their positions are saved in tables.
+- Words are hashed and their positions are saved in tables.
 
-- [x] Only the tables of the hashed words in the search request are contacted during search.
+- Only the relevant parts of the index are contacted during search.
 
-- [x] Words are represented by hash alias integers during search.
-
-- [x] Search is performed using DuckDB SQL.
+- Search is performed using DuckDB SQL.
 
 ## Word Definition
 
@@ -39,10 +37,10 @@ A word is any sequence of Unicode lowercase alphanumeric characters between two 
 
 ## Search Criteria
 
-Twiga selects the IDs of texts that match the following criteria:
+Twiga returns text IDs that match the following criteria:
 
-* **1.** They have the full set of unique word hashes presented in the search request.
-* **2.** They have one or more sequences of word hashes identical to the sequence of word hashes in the search request.
+* **1.** They have the full set of unique words presented in the search request.
+* **2.** They have one or more sequences of words identical to the sequence of words in the search request.
 
 ## Ranking Criterion
 
