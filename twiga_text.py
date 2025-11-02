@@ -8,7 +8,7 @@ def twiga_text_writer(
     duckdb_connection: object,
     bins_total:        int,
     batch_table:       pa.Table
-) -> True:
+) -> bool:
     batch_table = duckdb_connection.sql(
         f"""
             SELECT

@@ -53,7 +53,7 @@ def twiga_dict_splitter(
     return list_of_dicts
 
 
-def twiga_hasher_error_callback(error: str) -> True:
+def twiga_hasher_error_callback(error: str) -> bool:
 
     print(error, flush=True)
 
@@ -63,7 +63,7 @@ def twiga_hasher_error_callback(error: str) -> True:
 def twiga_index_creator(
     database_file_path: str,
     bins_total:         int
-) -> True:
+) -> bool:
 
     duckdb_index_connection = duckdb.connect()
 
@@ -351,7 +351,7 @@ def twiga_word_hasher(
 def twiga_index_table_writer(
     duckdb_index_connection:  object,
     hashes_thread_dict:       dict
-) -> True:
+) -> bool:
 
     thread_duckdb_connection = duckdb_index_connection.cursor()
 
