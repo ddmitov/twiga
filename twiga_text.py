@@ -6,28 +6,32 @@ import pyarrow as pa
 
 def twiga_text_writer(
     duckdb_connection: object,
-    bins_total:        int,
+    text_bins:         int,
     batch_table:       pa.Table
 ) -> bool:
-    batch_table = duckdb_connection.sql(
-        f"""
-            SELECT
-                *,
-                ((text_id % {str(bins_total)}) + 1) AS bin
-            FROM batch_table
-        """
-    ).arrow()
+    """Write texts to sharded bins based on text_id modulo distribution."""
+
+    # Partition rows by bin:
+    text_ids = batch_table.column('text_id').to_pylist()
+
+    bin_indices = {}
+
+    for index, text_id in enumerate(text_ids):
+        bin_number = (text_id % text_bins) + 1
+
+        if bin_number not in bin_indices:
+            bin_indices[bin_number] = []
+
+        bin_indices[bin_number].append(index)
 
     duckdb_connection.execute("BEGIN TRANSACTION")
 
-    for bin_number in range(1, bins_total + 1):
+    # Insert each pre-partitioned subset directly
+    for bin_number, indices in bin_indices.items():
+        partition = batch_table.take(indices)
+
         duckdb_connection.execute(
-            f"""
-                INSERT INTO text.texts_bin_{str(bin_number)}
-                SELECT * EXCLUDE (bin),
-                FROM batch_table
-                WHERE bin = {str(bin_number)}
-            """
+            f"INSERT INTO text.texts_bin_{bin_number} SELECT * FROM partition"
         )
 
     duckdb_connection.execute("COMMIT")
@@ -37,15 +41,17 @@ def twiga_text_writer(
 
 def twiga_text_reader(
     duckdb_connection: object,
-    bins_total:        int,
+    text_bins:         int,
     text_id_table:     pa.Table
 ) -> None | pa.Table:
+    """Retrieve texts from sharded bins and join with search metadata."""
+
     text_id_list = text_id_table.column('text_id').to_pylist()
 
     bin_dict = {}
 
     for text_id in text_id_list:
-        bin_number = (text_id % bins_total) + 1
+        bin_number = (text_id % text_bins) + 1
 
         if bin_number not in bin_dict:
             bin_dict[bin_number] = []
@@ -69,23 +75,23 @@ def twiga_text_reader(
         if query_number < len(bin_dict):
             text_query += 'UNION'
 
-    text_table = duckdb_connection.sql(text_query).arrow()
+    text_table = duckdb_connection.sql(text_query).fetch_arrow_table()
 
     search_result_table = duckdb_connection.query(
         """
             SELECT
                 tit.matching_words,
                 tit.words_total AS total_words,
-                tit.matching_words_frequency,
+                tit.term_frequency,
                 tt.* EXCLUDE (text),
                 tt.text
             FROM
                 text_id_table AS tit
                 LEFT JOIN text_table AS tt
                     ON tt.text_id = tit.text_id
-            ORDER BY tit.matching_words_frequency DESC
+            ORDER BY tit.term_frequency DESC
         """
-    ).arrow()
+    ).fetch_arrow_table()
 
     if search_result_table.num_rows == 0:
         search_result_table = None

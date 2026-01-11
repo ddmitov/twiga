@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 # Core modules:
-
 from   collections          import defaultdict
 import gc
 import hashlib
@@ -23,6 +22,7 @@ def twiga_list_splitter(
     input_list:   list,
     parts_number: int
 ) -> List[list]:
+    """Split a list into N approximately equal parts."""
 
     parts = np.array_split(input_list, parts_number)
     list_of_lists = [list(part) for part in parts if len(part) > 0]
@@ -34,6 +34,7 @@ def twiga_dict_splitter(
     input_dict:   dict,
     parts_number: int
 ) -> List[dict]:
+    """Split a dictionary into N smaller dictionaries by keys."""
 
     key_items = list(input_dict.keys())
     key_parts = np.array_split(key_items, parts_number)
@@ -54,6 +55,7 @@ def twiga_dict_splitter(
 
 
 def twiga_hasher_error_callback(error: str) -> bool:
+    """Print errors from multiprocessing pool and return True."""
 
     print(error, flush=True)
 
@@ -62,15 +64,16 @@ def twiga_hasher_error_callback(error: str) -> bool:
 
 def twiga_index_creator(
     database_file_path: str,
-    bins_total:         int
+    index_bins:         int
 ) -> bool:
+    """Create the index database schema with sharded hash tables."""
 
     duckdb_index_connection = duckdb.connect()
 
     duckdb_index_connection.execute(f"ATTACH '{database_file_path}' AS index")
 
     duckdb_index_connection.execute(
-        f"""
+        """
             CREATE TABLE index.word_counts (
                 text_id     INTEGER PRIMARY KEY,
                 words_total INTEGER
@@ -82,7 +85,7 @@ def twiga_index_creator(
         'CREATE SEQUENCE index.hash_id_sequence START 1'
     )
 
-    for bin_number in range(1, bins_total + 1):
+    for bin_number in range(1, index_bins + 1):
         duckdb_index_connection.execute(
             f"""
                 CREATE TABLE index.bin_{str(bin_number)}_hash_dict (
@@ -115,6 +118,7 @@ def twiga_index_writer(
     stopword_set:             set,
     hasher_batch_maximum:     int
 ) -> tuple[int, int]:
+    """Tokenize, hash, and write word index entries for a batch of texts."""
 
     normalizer = normalizers.Sequence(
         [
@@ -157,12 +161,14 @@ def twiga_index_writer(
     del pre_tokenized_texts
     gc.collect()
 
+    # Split texts into batches by word count to control memory usage during hashing.
+    # Each batch contains [text_ids[], word_lists[]] up to hasher_batch_maximum words.
     hasher_batches       = []
     current_hasher_batch = [[], []]
     current_word_count   = 0
 
     for text_id, word_list in zip(text_id_list, text_words_list):
-        words_number = len(text_words_list)
+        words_number = len(word_list)
 
         if current_word_count + words_number > hasher_batch_maximum:
             if current_hasher_batch:
@@ -191,7 +197,7 @@ def twiga_index_writer(
         (
             batch[0],
             batch[1],
-            bins_total
+            index_bins
         )
         for batch in hasher_batches
     ]
@@ -203,7 +209,7 @@ def twiga_index_writer(
 
     with get_context('spawn').Pool(cpu_count()) as hashing_process_pool:
         results = hashing_process_pool.starmap_async(
-            twiga_word_hasher,
+            twiga_index_hasher,
             text_hasher_arguments,
             error_callback=twiga_hasher_error_callback
         )
@@ -238,14 +244,12 @@ def twiga_index_writer(
         f"ATTACH '{index_database_file_path}' AS index"
     )
 
-    duckdb_index_connection.execute(
-        f"SET preserve_insertion_order = false"
-    )
+    duckdb_index_connection.execute("SET preserve_insertion_order = false")
 
     duckdb_index_connection.execute("BEGIN TRANSACTION")
 
     duckdb_index_connection.execute(
-        f"""
+        """
             INSERT INTO index.word_counts
             SELECT *
             FROM word_counts_table
@@ -289,11 +293,12 @@ def twiga_index_writer(
     return texts_total, words_total
 
 
-def twiga_word_hasher(
+def twiga_index_hasher(
     text_id_list:    list,
     text_words_list: list,
-    bins_total:      int,
+    index_bins:      int,
 ) -> tuple[int, int]:
+    """Hash words and group them by bin number."""
 
     texts_total = 0
     words_total = 0
@@ -308,42 +313,48 @@ def twiga_word_hasher(
     for text_id, word_list in zip(text_id_list, text_words_list):
         texts_total += 1
 
-        text_hash_list = [
-            hashlib.blake2b(word.encode(), digest_size=32).hexdigest()
-            for word in word_list
-        ]
+        # Hash every word:
+        text_word_hash_list = []
+
+        for word in word_list:
+            word_hash = hashlib.blake2b(
+                word.encode(),
+                digest_size=32
+            ).hexdigest()
+
+            text_word_hash_list.append(word_hash)
 
         words_count_record = {}
 
         words_count_record['text_id']     = int(text_id)
-        words_count_record['words_total'] = len(text_hash_list)
+        words_count_record['words_total'] = len(word_list)
 
         word_counts.append(words_count_record)
 
         # Dictionary of lists:
         positions = {}
 
-        for position, hashed_word in enumerate(text_hash_list):
+        for position, hashed_word in enumerate(text_word_hash_list):
             if hashed_word not in positions:
                 positions[hashed_word] = []
 
             positions[hashed_word].append(position)
 
-        for hashed_word in text_hash_list:
+        for hashed_word in text_word_hash_list:
             words_total += 1
 
-            hashed_word_item = {}
+            hashed_word_record = {}
 
-            bin_number = (int(hashed_word, 16) % bins_total) + 1
+            bin_number = (int(hashed_word, 16) % index_bins) + 1
 
-            hashed_word_item['hash']        = str(hashed_word)
-            hashed_word_item['text_id']     = int(text_id)
-            hashed_word_item['positions']   = positions[hashed_word]
+            hashed_word_record['hash']      = str(hashed_word)
+            hashed_word_record['text_id']   = int(text_id)
+            hashed_word_record['positions'] = positions[hashed_word]
 
             if bin_number not in hashes:
                 hashes[bin_number] = []
 
-            hashes[bin_number].append(hashed_word_item)
+            hashes[bin_number].append(hashed_word_record)
 
     return texts_total, words_total, hashes, word_counts
 
@@ -352,6 +363,7 @@ def twiga_index_table_writer(
     duckdb_index_connection:  object,
     hashes_thread_dict:       dict
 ) -> bool:
+    """Write hash entries to bin-specific index tables in a thread."""
 
     thread_duckdb_connection = duckdb_index_connection.cursor()
 
@@ -363,12 +375,12 @@ def twiga_index_table_writer(
         thread_duckdb_connection.execute("BEGIN TRANSACTION")
 
         unique_bin_hashes_table = thread_duckdb_connection.sql(
-            f"""
+            """
                 SELECT hash
                 FROM bin_hashes_table
                 GROUP BY hash
             """
-        ).arrow()
+        ).fetch_arrow_table()
 
         unknown_bin_hashes_table = thread_duckdb_connection.sql(
             f"""
@@ -381,16 +393,16 @@ def twiga_index_table_writer(
                     INNER JOIN unique_bin_hashes_table AS ubht
                         ON ubht.hash = hd.hash
             """
-        ).arrow()
+        ).fetch_arrow_table()
 
         new_hashes_table = thread_duckdb_connection.sql(
-            f"""
+            """
                 SELECT
                     hash,
                     NEXTVAL('index.hash_id_sequence') AS hash_id
                 FROM unknown_bin_hashes_table
             """
-        ).arrow()
+        ).fetch_arrow_table()
 
         thread_duckdb_connection.execute(
             f"""
@@ -419,250 +431,3 @@ def twiga_index_table_writer(
     thread_duckdb_connection.close()
 
     return True
-
-
-def twiga_request_hasher(search_request: str, stopword_set: set) -> list:
-
-    normalizer = normalizers.Sequence(
-        [
-            normalizers.NFD(),          # Decompose Unicode characters
-            normalizers.StripAccents(), # Remove accents after decomposition
-            normalizers.Lowercase()     # Convert to lowercase
-        ]
-    )
-
-    normalized_search_request = normalizer.normalize_str(search_request)
-
-    pre_tokenizer = pre_tokenizers.Sequence(
-        [
-            pre_tokenizers.Whitespace(),
-            pre_tokenizers.Punctuation(behavior='removed'),
-            pre_tokenizers.Digits(individual_digits=False)
-        ]
-    )
-
-    pre_tokenized_search_request = \
-        pre_tokenizer.pre_tokenize_str(normalized_search_request)
-
-    hash_list = [
-        hashlib.blake2b(word_tuple[0].encode(), digest_size=32).hexdigest()
-        for word_tuple in pre_tokenized_search_request
-        if word_tuple[0] not in stopword_set
-    ]
-
-    return hash_list
-
-
-def twiga_index_reader(
-    duckdb_connection: object,
-    bins_total:        int,
-    request_hash_list: list
-) -> tuple[None, None] | tuple[list, pa.Table]:
-
-    if len(request_hash_list) == 0:
-        return None, None
-
-    hash_set = set(request_hash_list)
-    bin_dict = {}
-
-    for hash_item in hash_set:
-        bin_number = (int(hash_item, 16) % bins_total) + 1
-
-        if bin_number not in bin_dict:
-            bin_dict[bin_number] = []
-
-        bin_dict[bin_number].append(hash_item)
-
-    mapping_query  = ''
-    hash_query     = ''
-    query_number   = 0
-
-    for bin_number, hash_list in bin_dict.items():
-        query_number += 1
-
-        hash_list_string = "'" + "', '".join(map(str, set(hash_list))) + "'"
-
-        mapping_query += f"""
-            SELECT
-                hash,
-                hash_id,
-            FROM bin_{str(bin_number)}_hash_dict
-            WHERE hash IN ({hash_list_string})
-        """
-
-        hash_query += f"""
-            SELECT
-                hi.hash_id,
-                hi.text_id AS text_id,
-                hi.positions AS positions
-            FROM
-                bin_{str(bin_number)}_hash_index AS hi
-                INNER JOIN mapping_table AS mt
-                    ON mt.hash_id = hi.hash_id
-            WHERE mt.hash IN ({hash_list_string})
-        """
-
-        if query_number < len(bin_dict):
-            mapping_query += 'UNION'
-            hash_query    += 'UNION'
-
-
-    # The order of execution of the SQL queries is important here:
-    mapping_table = duckdb_connection.sql(mapping_query).arrow()
-    hash_table    = duckdb_connection.sql(hash_query).arrow()
-
-    mapping_dict = dict(
-        zip(
-            mapping_table['hash'].to_pylist(),
-            mapping_table['hash_id'].to_pylist()
-        )
-    )
-
-    try:
-        hash_id_list = [mapping_dict[item] for item in request_hash_list]
-    except Exception:
-        return None, None
-
-    return hash_id_list, hash_table
-
-
-def twiga_single_word_searcher(
-    duckdb_connection: object,
-    hash_table:        pa.Table,
-    results_number:    int
-) -> None | pa.Table:
-
-    results_number_string = str(results_number)
-
-    search_query = f"""
-        SELECT
-            ht.text_id,
-            LEN(FIRST(ht.positions)) AS matching_words,
-            FIRST(wc.words_total) AS words_total,
-            ROUND(
-                (matching_words / FIRST(wc.words_total)), 5
-            ) AS matching_words_frequency
-        FROM
-            hash_table AS ht
-            LEFT JOIN word_counts AS wc
-                ON wc.text_id = ht.text_id
-        GROUP BY ht.text_id
-        ORDER BY matching_words_frequency DESC
-        LIMIT {results_number_string}
-    """
-
-    result_table = duckdb_connection.sql(search_query).arrow()
-
-    if result_table.num_rows == 0:
-        result_table = None
-
-    return result_table
-
-
-def twiga_multiple_words_searcher(
-    duckdb_connection: object,
-    hash_table:        pa.Table,
-    hash_id_list:      list,
-    results_number:    int
-) -> None | pa.Table:
-
-    request_sequence_string = '#'.join(map(str, hash_id_list))
-
-    search_query = f"""
-        WITH
-            full_hash_set AS (
-                SELECT text_id
-                FROM hash_table
-                GROUP BY text_id
-                HAVING COUNT(DISTINCT(hash_id)) = {str(len(set(hash_id_list)))}
-            ),
-
-            positions_by_hash AS (
-                SELECT
-                    ht.hash_id,
-                    ht.text_id,
-                    UNNEST(ht.positions) AS position
-                FROM
-                    hash_table AS ht
-                    INNER JOIN full_hash_set AS fhs
-                        ON fhs.text_id = ht.text_id
-            ),
-
-            positions_by_text AS (
-                SELECT
-                    text_id,
-                    hash_id,
-                    position
-                FROM positions_by_hash
-                GROUP BY
-                    text_id,
-                    hash_id,
-                    position
-            ),
-
-            distances AS (
-                SELECT
-                    text_id,
-                    hash_id,
-                    position,
-                    LEAD(position) OVER (
-                        PARTITION BY text_id
-                        ORDER BY position ASC
-                        ROWS BETWEEN CURRENT ROW and 1 FOLLOWING
-                    ) - position AS lead,
-                FROM positions_by_text
-            ),
-
-            borders AS (
-                SELECT
-                    text_id,
-                    position,
-                    CASE
-                        WHEN lead > 1
-                        THEN CONCAT(CAST(hash_id AS VARCHAR), '##')
-                        ELSE CAST(hash_id AS VARCHAR)
-                    END AS hash_id_string
-                FROM distances
-            ),
-
-            texts AS (
-                SELECT
-                    text_id,
-                    STRING_AGG(hash_id_string, '#' ORDER BY position) AS text
-                FROM borders
-                GROUP BY text_id
-            ),
-
-            sequences AS (
-                SELECT
-                    text_id,
-                    UNNEST(STRING_SPLIT(text, '###')) AS sequence
-                FROM texts
-            )
-
-        SELECT
-            s.text_id,
-            COUNT(s.sequence) * {str(len(hash_id_list))} AS matching_words,
-            FIRST(wc.words_total) AS words_total,
-            ROUND(
-                (matching_words / FIRST(wc.words_total)), 5
-            ) AS matching_words_frequency
-        FROM
-            sequences AS s
-            LEFT JOIN word_counts AS wc
-                ON wc.text_id = s.text_id
-        WHERE
-            s.sequence = '{request_sequence_string}'
-            OR s.sequence LIKE '%{request_sequence_string}'
-            OR s.sequence LIKE '{request_sequence_string}%'
-        GROUP BY s.text_id
-        ORDER BY matching_words_frequency DESC
-        LIMIT {str(results_number)}
-    """
-
-    result_table = duckdb_connection.sql(search_query).arrow()
-
-    if result_table.num_rows == 0:
-        result_table = None
-
-    return result_table

@@ -8,28 +8,31 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 ## Design Objectives
 
-* **1.** Fast subsecond lexical search
-* **2.** Fast indexing of large number of texts
-* **3.** Index data stored entirely in standard SQL tables
-* **4.** Usability in a variety of SQL-driven systems
+- [x] Fast subsecond lexical search across a large number of texts
+
+- [x] Index data stored entirely in standard SQL tables
+
+- [ ] Usability in a variety of SQL-driven systems
 
 ## Features
-
-- [x] Index data is stored only in standard SQL tables.
 
 - [x] Twiga is language-agnostic, different languages can coexist in a single index.
 
 - [x] Index and text locations are independent from one another, texts may live in a different system.
 
-## Workflow
+## Indexing Workflow
 
-- Texts are split into words using a normalizer and a pre-tokenizer from the Tokenizers Python module.
+- All texts are split into words using a normalizer and a pre-tokenizer from the Tokenizers Python module.
 
-- Words are hashed and their positions are saved in tables.
+- Each word is hashed and its position is saved in a table, part of a partitioned index.
 
-- Only the relevant parts of the index are contacted during search.
+## Searching Workflow
 
-- Search is performed using DuckDB SQL.
+- Every search requests is converted into hashes of words.
+
+- Only small part of the index tables are contacted during search.
+
+- Search and ranking are performed using vanilla DuckDB SQL with no use of DuckDB extensions.
 
 ## Word Definition
 
@@ -44,7 +47,7 @@ Twiga returns text IDs that match the following criteria:
 
 ## Ranking Criterion
 
-Matching words frequency is the ranking criterion. It is defined as the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
+Term frequency is the ranking criterion. It is defined as the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
 
 ## Name
 
@@ -60,4 +63,4 @@ This program is licensed under the terms of the Apache License 2.0.
 
 ## Author
 
-[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2025
+[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2025 - 2026

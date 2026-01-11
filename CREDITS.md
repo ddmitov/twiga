@@ -3,12 +3,13 @@
 Amata mea Argeia - gratiam magnam tibi ago!  
 Patientia tua in studiis meis computatoriis auxilium meum maximum!  
 
-Many thanks to Svilen Stanoev who introduced me to the concept of partitioned datasets in object storage some years ago!  
+Many thanks to Svilen Stanoev who introduced me
+to the concept of partitioned datasets in object storage some years ago!  
 Thank you, Svilen!  
 
 Many thanks to the contributors of Apache Arrow, DuckDB and Hugging Face Tokenizers!  
 
-Many thanks to the team of Hugging Face Datasets!  
+Many thanks to the team of the Hugging Face Datasets!  
 
 ## Python Modules
 

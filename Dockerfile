@@ -8,17 +8,17 @@ RUN pip install --no-cache \
     tokenizers
 
 # Demo-related dependencies:
-RUN pip install --no-cache \
-    datasets               \
-    "gradio <= 5.34.0"     \
-    pandas                 \
+RUN pip install --no-cache  \
+    datasets                \
+    "gradio[mcp] <= 5.34.0" \
+    pandas                  \
     python-dotenv
 
 RUN mkdir /home/twiga
 
 # Twiga files:
-COPY ./twiga_core.py   /home/twiga/twiga_core.py
-COPY ./twiga_text.py   /home/twiga/twiga_text.py
+COPY ./twiga_core_search.py /home/twiga/twiga_core_search.py
+COPY ./twiga_text.py        /home/twiga/twiga_text.py
 
 # Demo application files:
 COPY ./.env             /home/twiga/.env

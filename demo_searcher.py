@@ -15,11 +15,10 @@ import gradio  as     gr
 import uvicorn
 
 # Twiga modules:
-from twiga_core import twiga_request_hasher
-from twiga_core import twiga_index_reader
-from twiga_core import twiga_single_word_searcher
-from twiga_core import twiga_multiple_words_searcher
-from twiga_text import twiga_text_reader
+from twiga_core_search import twiga_request_hasher
+from twiga_core_search import twiga_index_reader
+from twiga_core_search import twiga_searcher
+from twiga_text        import twiga_text_reader
 
 # Start the application for local development at http://0.0.0.0:7860/ using:
 # docker run --rm -it -p 7860:7860 \
@@ -92,13 +91,36 @@ stopword_set = stopwords_bg_set | stopwords_en_set
 
 def text_searcher(
     search_request: str,
-    results_number: int
+    results_number: str
 ) -> tuple[dict, dict]:
+    """
+    Search for texts matching a search query.
+
+    This function performs lexical search across the indexed text corpus
+    using word hashing for efficient matching.
+
+    Args:
+        search_request: The search query containing one or more words.
+        results_number: Maximum number of search results to return.
+            Use "All" or "0" for unlimited results.
+
+    Returns:
+        A tuple containing:
+        - info: Dictionary with search performance metrics (timing data)
+        - search_result: Dictionary with matching texts, keyed by result number
+    """
+
     # Update the timestamp of the last activity:
     global last_activity
     last_activity = time.time()
 
     global stopword_set
+
+    # Convert results_number to int (handle "All" option):
+    if str(results_number).lower() == 'all':
+        max_results = 0
+    else:
+        max_results = int(results_number)
 
     # Hash the search request:
     hash_list = twiga_request_hasher(search_request, stopword_set)
@@ -110,11 +132,12 @@ def text_searcher(
     global duckdb_index_connection
     global duckdb_text_connection
 
-    BINS_TOTAL = 500
+    index_bins = int(os.environ['INDEX_BINS'])
+    text_bins = int(os.environ['TEXT_BINS'])
 
     hash_id_list, hash_table = twiga_index_reader(
         duckdb_index_connection,
-        BINS_TOTAL,
+        index_bins,
         hash_list
     )
 
@@ -126,20 +149,12 @@ def text_searcher(
     text_id_table = None
 
     if hash_table is not None:
-        if len(hash_list) == 1:
-            text_id_table = twiga_single_word_searcher(
-                duckdb_index_connection,
-                hash_table,
-                results_number
-            )
-
-        if len(hash_list) > 1:
-            text_id_table = twiga_multiple_words_searcher(
-                duckdb_index_connection,
-                hash_table,
-                hash_id_list,
-                results_number
-            )
+        text_id_table = twiga_searcher(
+            duckdb_index_connection,
+            hash_table,
+            hash_id_list,
+            max_results
+        )
 
     search_time = round((time.time() - search_start), 3)
 
@@ -151,7 +166,7 @@ def text_searcher(
     if text_id_table is not None:
         search_result_table = twiga_text_reader(
             duckdb_text_connection,
-            BINS_TOTAL,
+            text_bins,
             text_id_table
         )
 
@@ -162,8 +177,7 @@ def text_searcher(
     if search_result_dataframe is None:
         search_result['Message:'] = 'No matching texts were found.'
 
-    # The results dataframe is converted to
-    # a numbered list of dictionaries with numbers starting from 1:
+    # Convert dataframe rows to dict keyed by 1-based index for JSON output
     if search_result_dataframe is not None:
         search_result_index = range(1, len(search_result_dataframe) + 1)
         search_result_list = search_result_dataframe.to_dict('records')
@@ -184,23 +198,102 @@ def text_searcher(
 
     info = {}
 
-    info['twiga_index_reader() .......... runtime in seconds'] = index_reading_time
-
-    if len(hash_list) == 1:
-        info['twiga_single_word_searcher() .. runtime in seconds'] = search_time
-
-    if len(hash_list) > 1:
-        info['twiga_multiple_words_searcher() runtime in seconds'] = search_time
-
-    info['twiga_text_reader() ........... runtime in seconds'] = text_extraction_time
-    info['Twiga functions total ......... runtime in seconds'] = total_time
+    info['twiga_index_reader() ... runtime in seconds'] = index_reading_time
+    info['twiga_searcher() ....... runtime in seconds'] = search_time
+    info['twiga_text_reader() .... runtime in seconds'] = text_extraction_time
+    info['Twiga functions total .. runtime in seconds'] = total_time
 
     return info, search_result
 
 
+def mcp_search(query: str, max_results: int = 10) -> list[dict]:
+    """
+    Search for texts matching a query (MCP tool for LLMs).
+
+    This is a simplified search interface designed for use as an MCP tool
+    by Large Language Models. It returns search results in a flat list format
+    that is easier for LLMs to process.
+
+    Args:
+        query: The search query containing one or more words.
+            Example: "climate" or "climate change effects".
+        max_results: Maximum number of results to return (default: 10).
+            Use 0 for unlimited results.
+
+    Returns:
+        A list of dictionaries, each containing:
+        - title: The title of the matching text
+        - date: Publication date of the text
+        - text: The full text content
+        - matching_words: Number of matching words found
+        - total_words: Total words in the text
+        - term_frequency: Ratio of matching to total words
+
+    Example:
+        >>> mcp_search("artificial intelligence", max_results=5)
+        [{"title": "AI Research Paper", "date": "2024-01-15", "text": "...", ...}]
+    """
+
+    # Update the timestamp of the last activity:
+    global last_activity
+    last_activity = time.time()
+    
+    global stopword_set
+
+    # Validate max_results (0 means unlimited, negative becomes 0):
+    max_results = max(0, max_results)
+
+    # Hash the search request:
+    hash_list = twiga_request_hasher(search_request, stopword_set)
+
+    # Use the global DuckDB connections:
+    global duckdb_index_connection
+    global duckdb_text_connection
+
+    index_bins = int(os.environ['INDEX_BINS'])
+    text_bins = int(os.environ['TEXT_BINS'])
+
+    # Read the hashed words index data:
+    hash_id_list, hash_table = twiga_index_reader(
+        duckdb_index_connection,
+        index_bins,
+        hash_list
+    )
+
+    # Search:
+    text_id_table = None
+
+    if hash_table is not None:
+        text_id_table = twiga_searcher(
+            duckdb_index_connection,
+            hash_table,
+            hash_id_list,
+            max_results
+        )
+
+    # No results found:
+    if text_id_table is None:
+        return [{"message": "No matching texts were found."}]
+
+    # Extract matching texts:
+    search_result_table = twiga_text_reader(
+        duckdb_text_connection,
+        text_bins,
+        text_id_table
+    )
+
+    # Convert to list of dictionaries:
+    results = search_result_table.to_pandas().to_dict('records')
+
+    return results
+
+
 def activity_inspector():
+    """Self-rescheduling timer that terminates the app after prolonged inactivity."""
+
     global last_activity
 
+    # Schedule the next check (recursive timer pattern)
     thread = threading.Timer(
         int(os.environ['INACTIVITY_CHECK_SECONDS']),
         activity_inspector
@@ -211,17 +304,27 @@ def activity_inspector():
 
     inactivity_maximum = int(os.environ['INACTIVITY_MAXIMUM_SECONDS'])
 
+    # Send SIGINT to gracefully shut down if idle too long (scale-to-zero)
     if time.time() - last_activity > inactivity_maximum:
         os.kill(os.getpid(), signal.SIGINT)
 
 
 def main():
+    """Main function to start Gradio demo application."""
+
     # Matplotlib writable config directory,
     # Matplotlib is a dependency of Gradio:
     os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
 
     # Disable Gradio telemetry:
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
+
+    # Check if MCP server is enabled:
+    mcp_enabled = os.environ.get('MCP_SERVER_ENABLED', 'false').lower() == 'true'
+
+    # Set Gradio MCP server environment variable:
+    if mcp_enabled:
+        os.environ['GRADIO_MCP_SERVER'] = 'True'
 
     # Initialize DuckDB connections:
     global duckdb_index_connection
@@ -238,7 +341,7 @@ def main():
                 SUM(words_total) AS words_total
             FROM word_counts
         """
-    ).arrow()
+    ).fetch_arrow_table()
 
     texts_total = statistics_table.column('texts_total')[0].as_py()
     words_total = statistics_table.column('words_total')[0].as_py()
@@ -247,9 +350,9 @@ def main():
     request_box = gr.Textbox(lines=1, label='Search Request')
 
     results_number = gr.Dropdown(
-        [10, 20, 50],
-        label='Maximal Number of Search Results',
-        value=10
+        ['10', '20', '50', 'All'],
+        label='Maximum Number of Search Results',
+        value='10'
     )
 
     info_box = gr.JSON(label='Search Info', show_label=True)
@@ -351,7 +454,8 @@ def main():
                         'international trade relations',
                         'international humanitarian aid',
                         'virtual learning',
-                        'София',
+                        'renewable energy sources',
+                        'global economic outlook',
                         'околна среда'
                     ],
                     fn=text_searcher,
@@ -385,7 +489,13 @@ def main():
             outputs=[info_box, results_box],
         )
 
-    gradio_interface.show_api = False
+        # Register MCP-only search function for LLM tool integration:
+        # This function is not visible in the UI but is exposed via the MCP server
+        # at /gradio_api/mcp/sse for use by LLM clients.
+        if mcp_enabled:
+            gr.api(mcp_search)
+
+    gradio_interface.show_api = mcp_enabled
     gradio_interface.ssr_mode = False
     gradio_interface.queue()
 
@@ -402,10 +512,16 @@ def main():
     last_activity = time.time()
 
     # Start activity inspector in a separate thread
-    # to implement scale-to-zero capability, i.e.
-    # when there is no user activity for a predefined amount of time
+    # to implement scale-to-zero capability,
+    # i.e. when there is no user activity for a predefined amount of time
     # the application will shut down.
     activity_inspector()
+
+    # Print MCP server status:
+    if mcp_enabled:
+        print('\nMCP server enabled!')
+        print('MCP endpoint: http://0.0.0.0:7860/gradio_api/mcp/sse')
+        print('MCP schema:   http://0.0.0.0:7860/gradio_api/mcp/schema\n')
 
     try:
         uvicorn.run(

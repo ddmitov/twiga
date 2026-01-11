@@ -15,19 +15,36 @@ import duckdb
 import numpy  as     np
 
 # Twiga modules:
-from twiga_core import twiga_index_creator
-from twiga_core import twiga_index_writer
+from twiga_core_index import twiga_index_creator
+from twiga_core_index import twiga_index_writer
 
 # Start the indexing process:
 # docker run --rm -it --user $(id -u):$(id -g) \
 # -v $PWD:/app \
 # -v $PWD/data:/.cache \
-# twiga-demo python /app/demo_index_maker.py
+# twiga-demo python /app/demo_indexer.py
 
 load_dotenv(find_dotenv())
 
 
+def get_all_text_ids(
+    duckdb_text_connection: object,
+    bin_number:             int
+) -> list:
+    """Get all text_ids from a bin (for fresh indexing mode)."""
+
+    text_ids = duckdb_text_connection.sql(
+        f"""
+            SELECT text_id
+            FROM text.texts_bin_{str(bin_number)}
+        """
+    ).fetch_arrow_table().column('text_id').to_pylist()
+
+    return text_ids
+
+
 def logger_starter() -> logging.Logger:
+    """Initialize and return a logger for the indexing process."""
 
     start_datetime_string = (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
@@ -47,10 +64,12 @@ def logger_starter() -> logging.Logger:
 
 
 def main():
+    """Process texts from bins and build the search index."""
 
-    BINS_TOTAL = 500
-    PARTS_PER_BIN = 2
-    HASHER_BATCH_MAXIMUM = 500000
+    index_bins     = int(os.environ['INDEX_BINS'])
+    text_bins      = int(os.environ['TEXT_BINS'])
+    parts_per_bin  = int(os.environ['INDEXER_PARTS_PER_BIN'])
+    batch_maximum  = int(os.environ['INDEXER_BATCH_MAXIMUM'])
 
     script_start = time()
     logger = logger_starter()
@@ -112,35 +131,50 @@ def main():
     index_database_file_path = '/app/data/twiga_index.duckdb'
     text_database_file_path  = '/app/data/twiga_texts.duckdb'
 
+    # Check if text database exists:
+    if not os.path.isfile(text_database_file_path):
+        message = (
+            f'Text database not found at {text_database_file_path}. ' +
+            'Please run demo_text_processor.py first.'
+        )
+        print(message, flush=True)
+        logger.error(message)
+        return False
+
+    # Create index database if it doesn't exist:
     if not os.path.isfile(index_database_file_path):
         twiga_index_creator(
             index_database_file_path,
-            BINS_TOTAL
+            index_bins
         )
+        message = 'Created new index database'
+        print(message, flush=True)
+        logger.info(message)
 
+    # Connect to text database (read-only):
     duckdb_text_connection = duckdb.connect()
 
     duckdb_text_connection.execute(
         f"ATTACH '{text_database_file_path}' AS text (READ_ONLY)"
     )
 
-    texts_total = 0
-    words_total = 0
+    texts_total  = 0
+    words_total  = 0
 
-    for bin_number in range(1, BINS_TOTAL + 1):
-        text_id_list = duckdb_text_connection.sql(
-            f"""
-                SELECT text_id
-                FROM text.texts_bin_{str(bin_number)}
-            """
-        ).arrow().column('text_id').to_pylist()
+    for bin_number in range(1, text_bins + 1):
+        text_id_list = get_all_text_ids(
+            duckdb_text_connection,
+            bin_number
+        )
 
-        bin_parts = np.array_split(text_id_list, PARTS_PER_BIN)
+        # Split each bin into smaller chunks to limit memory usage during indexing
+        bin_parts = np.array_split(text_id_list, parts_per_bin)
 
         for bin_part_number, bin_part in enumerate(bin_parts, 1):
             if len(bin_part) > 0:
                 indexing_start = time()
 
+                # Build comma-separated ID list for SQL IN clause
                 bin_part_string = ','.join(map(str, bin_part))
 
                 batch_table = duckdb_text_connection.sql(
@@ -151,10 +185,10 @@ def main():
                         FROM text.texts_bin_{str(bin_number)}
                         WHERE text_id IN ({str(bin_part_string)})
                     """
-                ).arrow()
+                ).fetch_arrow_table()
 
-                text_id_list = batch_table.column('text_id').to_pylist()
-                text_list    = batch_table.column('text').to_pylist()
+                text_id_list_batch = batch_table.column('text_id').to_pylist()
+                text_list          = batch_table.column('text').to_pylist()
 
                 # Delete objects that are not needed anymore and
                 # perform garbage collection to prevent memory leaks:
@@ -165,11 +199,11 @@ def main():
 
                 batch_texts, batch_words = twiga_index_writer(
                     index_database_file_path,
-                    text_id_list,
+                    text_id_list_batch,
                     text_list,
-                    BINS_TOTAL,
+                    index_bins,
                     stopword_set,
-                    HASHER_BATCH_MAXIMUM
+                    batch_maximum
                 )
 
                 texts_total += batch_texts
@@ -180,8 +214,8 @@ def main():
 
                 # Log batch processing data:
                 message = (
-                    f'bin {str(bin_number)}/{str(BINS_TOTAL)}, ' +
-                    f'part {str(bin_part_number)}/{str(PARTS_PER_BIN)} - ' +
+                    f'text bin {str(bin_number)}/{str(text_bins)}, ' +
+                    f'part {str(bin_part_number)}/{str(parts_per_bin)} - ' +
                     f'{str(batch_texts)} texts, ' +
                     f'{str(batch_words)} words indexed for ' +
                     f'{indexing_time_string}'
@@ -190,7 +224,7 @@ def main():
                 print(message, flush=True)
                 logger.info(message)
 
-                del text_id_list
+                del text_id_list_batch
                 del text_list
                 gc.collect()
 
@@ -199,11 +233,18 @@ def main():
     script_time = round((time() - script_start))
     script_time_string = str(timedelta(seconds=script_time))
 
-    message = (
-        f'{str(texts_total)} texts having a total of ' +
-        f'{str(words_total)} words were processed for ' +
-        f'{script_time_string}'
-    )
+    # Final summary:
+    if texts_total > 0:
+        message = (
+            f'{str(texts_total)} texts having a total of ' +
+            f'{str(words_total)} words were indexed for ' +
+            f'{script_time_string}'
+        )
+    else:
+        message = (
+            f'No new texts to index. {bins_skipped} bins were skipped. ' +
+            'Use INDEXER_RESUME=fresh to re-index all texts.'
+        )
 
     print(message, flush=True)
     logger.info(message)
