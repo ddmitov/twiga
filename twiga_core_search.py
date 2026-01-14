@@ -66,42 +66,52 @@ def twiga_index_reader(
 
         bin_dict[bin_number].append(hash_item)
 
-    hash_query   = ''
-    query_number = 0
+    mapping_query  = ''
+    hash_query     = ''
+    query_number   = 0
 
     for bin_number, hash_list in bin_dict.items():
         query_number += 1
 
         hash_list_string = "'" + "', '".join(map(str, set(hash_list))) + "'"
 
+        mapping_query += f"""
+            SELECT
+                hash,
+                hash_id,
+            FROM bin_{str(bin_number)}_hash_dict
+            WHERE hash IN ({hash_list_string})
+        """
+
         hash_query += f"""
             SELECT
-                hash_id,
-                text_id,
-                positions
-            FROM bin_{str(bin_number)}_hash_index
-            WHERE hash_id IN (
-                SELECT hash_id
-                FROM bin_{str(bin_number)}_hash_dict
-                WHERE hash IN ({hash_list_string})
-            )
+                hi.hash_id,
+                hi.text_id,
+                hi.positions
+            FROM
+                bin_{str(bin_number)}_hash_index AS hi
+                INNER JOIN mapping_table AS mt
+                    ON mt.hash_id = hi.hash_id
         """
 
         if query_number < len(bin_dict):
-            hash_query += 'UNION'
+            mapping_query += 'UNION'
+            hash_query    += 'UNION'
 
-    hash_table = duckdb_connection.sql(hash_query).fetch_arrow_table()
 
-    hash_id_query = """
-        SELECT hash_id
-        FROM hash_table
-        GROUP BY hash_id
-    """
+    # The order of execution of the SQL queries is important here:
+    mapping_table = duckdb_connection.sql(mapping_query).fetch_arrow_table()
+    hash_table    = duckdb_connection.sql(hash_query).fetch_arrow_table()
 
-    hash_id_table = duckdb_connection.sql(hash_id_query).fetch_arrow_table()
+    mapping_dict = dict(
+        zip(
+            mapping_table['hash'].to_pylist(),
+            mapping_table['hash_id'].to_pylist()
+        )
+    )
 
     try:
-        hash_id_list = hash_id_table['hash_id'].to_pylist()
+        hash_id_list = [mapping_dict[item] for item in request_hash_list]
     except Exception:
         return None, None
 
@@ -145,96 +155,66 @@ def twiga_searcher(
 
     # Multiple words - use offset-based islands-and-gaps for phrase matching:
     if len(hash_id_list) > 1:
-        request_sequence_string = '#'.join(map(str, hash_id_list))
+        request_sequence_string = ''.join(map(str, hash_id_list))
 
         search_query = f"""
             WITH
-                full_hash_set AS (
+                full_hash_set_texts AS (
                     SELECT text_id
                     FROM hash_table
                     GROUP BY text_id
                     HAVING COUNT(DISTINCT(hash_id)) = {str(len(set(hash_id_list)))}
                 ),
 
-                positions_by_hash AS (
+                positions AS (
                     SELECT
                         ht.hash_id,
                         ht.text_id,
                         UNNEST(ht.positions) AS position
                     FROM
                         hash_table AS ht
-                        INNER JOIN full_hash_set AS fhs
-                            ON fhs.text_id = ht.text_id
-                ),
-
-                positions_by_text AS (
-                    SELECT
-                        text_id,
-                        hash_id,
-                        position
-                    FROM positions_by_hash
-                    GROUP BY
-                        text_id,
-                        hash_id,
-                        position
-                ),
-
-                distances AS (
-                    SELECT
-                        text_id,
-                        hash_id,
-                        position,
-                        LEAD(position) OVER (
-                            PARTITION BY text_id
-                            ORDER BY position ASC
-                            ROWS BETWEEN CURRENT ROW and 1 FOLLOWING
-                        ) - position AS lead,
-                    FROM positions_by_text
-                ),
-
-                borders AS (
-                    SELECT
-                        text_id,
-                        position,
-                        CASE
-                            WHEN lead > 1
-                            THEN CONCAT(CAST(hash_id AS VARCHAR), '##')
-                            ELSE CAST(hash_id AS VARCHAR)
-                        END AS hash_id_string
-                    FROM distances
-                ),
-
-                texts AS (
-                    SELECT
-                        text_id,
-                        STRING_AGG(hash_id_string, '#' ORDER BY position) AS text
-                    FROM borders
-                    GROUP BY text_id
+                        INNER JOIN full_hash_set_texts AS fhst
+                            ON fhst.text_id = ht.text_id
                 ),
 
                 sequences AS (
                     SELECT
                         text_id,
-                        UNNEST(STRING_SPLIT(text, '###')) AS sequence
-                    FROM texts
+                        hash_id,
+                        position,
+                        DENSE_RANK() OVER (
+                            PARTITION BY text_id
+                            ORDER BY position ASC
+                        ) - position AS sequence_id
+                    FROM positions
+                ),
+
+                sequences_by_text AS (
+                    SELECT
+                        text_id,
+                        STRING_AGG(hash_id, '' ORDER BY position) AS sequence
+                    FROM sequences
+                    GROUP BY
+                        text_id,
+                        sequence_id
                 )
 
             SELECT
-                s.text_id,
-                COUNT(s.sequence) * {str(len(hash_id_list))} AS matching_words,
+                sbt.text_id,
+                COUNT(sbt.sequence) * {str(len(hash_id_list))} AS matching_words,
                 FIRST(wc.words_total) AS words_total,
                 ROUND(
                     (matching_words / FIRST(wc.words_total)), 5
                 ) AS term_frequency
             FROM
-                sequences AS s
+                sequences_by_text AS sbt
                 LEFT JOIN word_counts AS wc
-                    ON wc.text_id = s.text_id
+                    ON wc.text_id = sbt.text_id
             WHERE
-                s.sequence = '{request_sequence_string}'
-                OR s.sequence LIKE '%{request_sequence_string}'
-                OR s.sequence LIKE '{request_sequence_string}%'
-            GROUP BY s.text_id
+                sbt.sequence = '{request_sequence_string}'
+                OR sbt.sequence LIKE '%{request_sequence_string}'
+                OR sbt.sequence LIKE '{request_sequence_string}%'
+            GROUP BY sbt.text_id
             ORDER BY term_frequency DESC
             {limit_clause}
         """
