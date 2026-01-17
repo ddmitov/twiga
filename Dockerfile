@@ -12,6 +12,7 @@ RUN pip install --no-cache  \
     datasets                \
     "gradio[mcp] <= 5.34.0" \
     pandas                  \
+    psutil                  \
     python-dotenv
 
 RUN mkdir /home/twiga

@@ -230,21 +230,15 @@ def main():
 
     duckdb_text_connection.close()
 
+   # Final summary: 
     script_time = round((time() - script_start))
     script_time_string = str(timedelta(seconds=script_time))
 
-    # Final summary:
-    if texts_total > 0:
-        message = (
-            f'{str(texts_total)} texts having a total of ' +
-            f'{str(words_total)} words were indexed for ' +
-            f'{script_time_string}'
-        )
-    else:
-        message = (
-            f'No new texts to index. {bins_skipped} bins were skipped. ' +
-            'Use INDEXER_RESUME=fresh to re-index all texts.'
-        )
+    message = (
+        f'{str(texts_total)} texts having a total of ' +
+        f'{str(words_total)} words were indexed for ' +
+        f'{script_time_string}'
+    )
 
     print(message, flush=True)
     logger.info(message)

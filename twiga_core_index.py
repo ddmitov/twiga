@@ -114,7 +114,7 @@ def twiga_index_writer(
     index_database_file_path: str,
     text_id_list:             list,
     text_list:                list,
-    bins_total:               int,
+    index_bins:               int,
     stopword_set:             set,
     hasher_batch_maximum:     int
 ) -> tuple[int, int]:

@@ -197,6 +197,7 @@ def twiga_searcher(
                     GROUP BY
                         text_id,
                         sequence_id
+                    HAVING COUNT(hash_id) = {str(len(hash_id_list))}
                 )
 
             SELECT
@@ -210,10 +211,7 @@ def twiga_searcher(
                 sequences_by_text AS sbt
                 LEFT JOIN word_counts AS wc
                     ON wc.text_id = sbt.text_id
-            WHERE
-                sbt.sequence = '{request_sequence_string}'
-                OR sbt.sequence LIKE '%{request_sequence_string}'
-                OR sbt.sequence LIKE '{request_sequence_string}%'
+            WHERE sbt.sequence = '{request_sequence_string}'
             GROUP BY sbt.text_id
             ORDER BY term_frequency DESC
             {limit_clause}

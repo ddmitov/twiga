@@ -96,9 +96,6 @@ def main():
         "CREATE SEQUENCE IF NOT EXISTS text.text_id_sequence START 1"
     )
 
-    # Create processing state table for tracking progress:
-    create_processing_state_table(duckdb_connection)
-
     # Create partitioned tables (bins) to distribute texts for parallel processing:
     for bin_number in range(1, text_bins + 1):
         duckdb_connection.execute(
@@ -196,9 +193,6 @@ def main():
 
         twiga_text_writer(duckdb_connection, text_bins, batch_table)
 
-        # Save progress checkpoint after successful write:
-        save_processing_progress(duckdb_connection, table_number)
-
         writing_time = round((time() - writing_start))
         writing_time_string = str(timedelta(seconds=writing_time))
 
@@ -229,7 +223,7 @@ def main():
     script_time_string = str(timedelta(seconds=script_time))
 
     # Log final script statistics:
-    message = (f'{texts_total} texts were written for {script_time_string}')
+    message = (f'\n{texts_total} texts were written for {script_time_string}')
 
     print(message, flush=True)
     logger.info(message)
