@@ -159,13 +159,15 @@ def twiga_searcher(
 
         search_query = f"""
             WITH
-                full_hash_set_texts AS (
+                -- Step 1. Keep only texts that contain all required hashes:
+                texts_with_all_hashes AS (
                     SELECT text_id
                     FROM hash_table
                     GROUP BY text_id
                     HAVING COUNT(DISTINCT(hash_id)) = {str(len(set(hash_id_list)))}
                 ),
 
+                -- Step 2. Flatten position arrays into individual rows:
                 positions AS (
                     SELECT
                         ht.hash_id,
@@ -173,10 +175,12 @@ def twiga_searcher(
                         UNNEST(ht.positions) AS position
                     FROM
                         hash_table AS ht
-                        INNER JOIN full_hash_set_texts AS fhst
-                            ON fhst.text_id = ht.text_id
+                        INNER JOIN texts_with_all_hashes AS tah
+                            ON tah.text_id = ht.text_id
                 ),
 
+                -- Step 3. Define gaps and islands using DENSE_RANK.
+                -- DENSE_RANK() - position is constant for consecutive positions:
                 sequences AS (
                     SELECT
                         text_id,
@@ -189,6 +193,7 @@ def twiga_searcher(
                     FROM positions
                 ),
 
+                -- Step 4. Build sequence strings for every consecutive group:
                 sequences_by_text AS (
                     SELECT
                         text_id,
@@ -200,6 +205,7 @@ def twiga_searcher(
                     HAVING COUNT(hash_id) = {str(len(hash_id_list))}
                 )
 
+            -- Step 5. Match sequences containing the search pattern:
             SELECT
                 sbt.text_id,
                 COUNT(sbt.sequence) * {str(len(hash_id_list))} AS matching_words,
