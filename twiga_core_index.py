@@ -66,7 +66,7 @@ def twiga_index_creator(
     database_file_path: str,
     index_bins:         int
 ) -> bool:
-    """Create the index database schema with sharded hash tables."""
+    """Create the index database schema with sharded hash tables in bin schemas."""
 
     duckdb_index_connection = duckdb.connect()
 
@@ -81,28 +81,10 @@ def twiga_index_creator(
         """
     )
 
-    duckdb_index_connection.execute(
-        'CREATE SEQUENCE index.hash_id_sequence START 1'
-    )
-
+    # Create a schema for each bin
     for bin_number in range(1, index_bins + 1):
         duckdb_index_connection.execute(
-            f"""
-                CREATE TABLE index.bin_{str(bin_number)}_hash_dict (
-                    hash    VARCHAR PRIMARY KEY,
-                    hash_id INTEGER UNIQUE
-                )
-            """
-        )
-
-        duckdb_index_connection.execute(
-            f"""
-                CREATE TABLE index.bin_{str(bin_number)}_hash_index (
-                    hash_id   INTEGER,
-                    text_id   INTEGER,
-                    positions INTEGER[]
-                )
-            """
+            f"CREATE SCHEMA index.b_{str(bin_number)}"
         )
 
     duckdb_index_connection.close()
@@ -118,7 +100,7 @@ def twiga_index_writer(
     stopword_set:             set,
     hasher_batch_maximum:     int
 ) -> tuple[int, int]:
-    """Tokenize, hash, and write word index entries for a batch of texts."""
+    """Tokenize, hash, and write index entries for a batch of texts."""
 
     normalizer = normalizers.Sequence(
         [
@@ -363,7 +345,7 @@ def twiga_index_table_writer(
     duckdb_index_connection:  object,
     hashes_thread_dict:       dict
 ) -> bool:
-    """Write hash entries to bin-specific index tables in a thread."""
+    """Write hash entries to hash-named tables in bin schemas in a thread."""
 
     thread_duckdb_connection = duckdb_index_connection.cursor()
 
@@ -374,57 +356,41 @@ def twiga_index_table_writer(
 
         thread_duckdb_connection.execute("BEGIN TRANSACTION")
 
+        # Get unique hashes and their first 60 characters:
         unique_bin_hashes_table = thread_duckdb_connection.sql(
             """
-                SELECT hash
+                SELECT
+                    hash,
+                    SUBSTRING(hash, 1, 60) AS hash_short
                 FROM bin_hashes_table
                 GROUP BY hash
             """
         ).fetch_arrow_table()
 
-        unknown_bin_hashes_table = thread_duckdb_connection.sql(
-            f"""
-                SELECT hash
-                FROM unique_bin_hashes_table
-                EXCEPT
-                SELECT hd.hash
-                FROM
-                    index.bin_{str(bin_number)}_hash_dict AS hd
-                    INNER JOIN unique_bin_hashes_table AS ubht
-                        ON ubht.hash = hd.hash
-            """
-        ).fetch_arrow_table()
+        # For each unique hash, create table if needed and insert:
+        for hash_row in unique_bin_hashes_table.to_pylist():
+            hash_full  = hash_row['hash']
+            hash_short = hash_row['hash_short']
 
-        new_hashes_table = thread_duckdb_connection.sql(
-            """
+            table_name = f"index.b_{bin_number}.h_{hash_short}"
+
+            # Create table for this hash if it doesn't exist:
+            thread_duckdb_connection.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    text_id   INTEGER,
+                    positions INTEGER[]
+                )
+            """)
+
+            # Insert index entries:
+            thread_duckdb_connection.execute(f"""
+                INSERT INTO {table_name}
                 SELECT
-                    hash,
-                    NEXTVAL('index.hash_id_sequence') AS hash_id
-                FROM unknown_bin_hashes_table
-            """
-        ).fetch_arrow_table()
-
-        thread_duckdb_connection.execute(
-            f"""
-                INSERT INTO index.bin_{str(bin_number)}_hash_dict
-                SELECT *
-                FROM new_hashes_table
-            """
-        )
-
-        thread_duckdb_connection.execute(
-            f"""
-                INSERT INTO index.bin_{str(bin_number)}_hash_index
-                SELECT
-                    ihd.hash_id AS hash_id,
-                    bht.text_id AS text_id,
-                    bht.positions AS positions
-                FROM
-                    bin_hashes_table AS bht
-                    LEFT JOIN index.bin_{str(bin_number)}_hash_dict AS ihd
-                        ON ihd.hash = bht.hash
-            """
-        )
+                    text_id,
+                    positions
+                FROM bin_hashes_table
+                WHERE hash = '{hash_full}'
+            """)
 
         thread_duckdb_connection.execute("COMMIT")
 

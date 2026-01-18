@@ -56,62 +56,34 @@ def twiga_index_reader(
         return None, None
 
     hash_set = set(request_hash_list)
-    bin_dict = {}
+
+    mapping_dict = {item: index for index, item in enumerate(hash_set)}
+
+    hash_query   = ''
+    query_number = 0
 
     for hash_item in hash_set:
-        bin_number = (int(hash_item, 16) % index_bins) + 1
-
-        if bin_number not in bin_dict:
-            bin_dict[bin_number] = []
-
-        bin_dict[bin_number].append(hash_item)
-
-    mapping_query  = ''
-    hash_query     = ''
-    query_number   = 0
-
-    for bin_number, hash_list in bin_dict.items():
         query_number += 1
 
-        hash_list_string = "'" + "', '".join(map(str, set(hash_list))) + "'"
-
-        mapping_query += f"""
-            SELECT
-                hash,
-                hash_id,
-            FROM bin_{str(bin_number)}_hash_dict
-            WHERE hash IN ({hash_list_string})
-        """
+        bin_number = (int(hash_item, 16) % index_bins) + 1
+        hash_short = hash_item[:60]
+        table_name = f"b_{bin_number}.h_{hash_short}"
 
         hash_query += f"""
             SELECT
-                hi.hash_id,
-                hi.text_id,
-                hi.positions
-            FROM
-                bin_{str(bin_number)}_hash_index AS hi
-                INNER JOIN mapping_table AS mt
-                    ON mt.hash_id = hi.hash_id
+                {mapping_dict[hash_item]} AS hash_id,
+                text_id,
+                positions
+            FROM {table_name}
         """
 
-        if query_number < len(bin_dict):
-            mapping_query += 'UNION'
-            hash_query    += 'UNION'
+        if query_number < len(hash_set):
+            hash_query += 'UNION'
 
-
-    # The order of execution of the SQL queries is important here:
-    mapping_table = duckdb_connection.sql(mapping_query).fetch_arrow_table()
-    hash_table    = duckdb_connection.sql(hash_query).fetch_arrow_table()
-
-    mapping_dict = dict(
-        zip(
-            mapping_table['hash'].to_pylist(),
-            mapping_table['hash_id'].to_pylist()
-        )
-    )
+    hash_table = duckdb_connection.sql(hash_query).fetch_arrow_table()
 
     try:
-        hash_id_list = [mapping_dict[item] for item in request_hash_list]
+        hash_id_list = [mapping_dict[hash_item] for hash_item in request_hash_list]
     except Exception:
         return None, None
 
@@ -119,10 +91,10 @@ def twiga_index_reader(
 
 
 def twiga_searcher(
-    duckdb_connection:   object,
-    hash_table:          pa.Table,
-    hash_id_list:        list,
-    results_number:      int
+    duckdb_connection: object,
+    hash_table:        pa.Table,
+    hash_id_list:      list,
+    results_number:    int
 ) -> None | pa.Table:
     """
     Find texts containing consecutive word sequences (phrase matching).
