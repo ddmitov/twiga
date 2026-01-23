@@ -21,8 +21,7 @@ from twiga_text import twiga_text_writer
 
 # Start the indexing process:
 # docker run --rm -it --user $(id -u):$(id -g) \
-# -v $PWD:/app \
-# -v $PWD/data:/.cache \
+# -v $PWD:/app -v $PWD/data:/.cache \
 # twiga-demo python /app/demo_text_processor.py
 
 load_dotenv(find_dotenv())
@@ -50,30 +49,11 @@ def logger_starter() -> logging.Logger:
 def main():
     """Main function to start the text processing."""
 
-    dataset_year  = os.environ['DEMO_DATASET_YEAR']
-
-    valid_years = {
-        '2016',
-        '2017',
-        '2018',
-        '2019',
-        '2020',
-        '2021',
-        '2022',
-        '2023',
-        '2024',
-        'default'
-    }
-
-    if dataset_year not in valid_years:
-        raise ValueError(
-            f"Invalid DEMO_DATASET_YEAR '{dataset_year}'. " +
-            f"Must be one of: {valid_years}"
-        )
-
-    first_table_number = int(os.environ['DEMO_DATASET_FIRST_TABLE_NUMBER'])
-    last_table_number  = int(os.environ['DEMO_DATASET_LAST_TABLE_NUMBER'])
-    texts_per_table    = int(os.environ['DEMO_DATASET_TEXTS_PER_TABLE'])
+    dataset_year       = '2024'
+    first_table_number = 0
+    last_table_number  = 400
+    texts_per_table    = 25000
+    max_texts          = 3000000
     text_bins          = int(os.environ['TEXT_BINS'])
 
     # Start measuring runtime and set logging:
@@ -137,22 +117,13 @@ def main():
         ]
     ).with_format('arrow')
 
-    # Use skip() for efficient seeking to the start point:
-    if first_table_number > 0:
-        skip_records = first_table_number * texts_per_table
-
-        message = f'Skipping {skip_records} records to start point ...'
-        print(message, flush=True)
-        logger.info(message)
-
-        dataset = dataset.skip(skip_records)
-
     # Iterate over the source dataset and
     # get texts as a sequence of Arrow record batches:
     print('\nProcessing the dataset ...\n', flush=True)
 
     table_number = first_table_number
     texts_total  = 0
+
     batches_remaining = last_table_number - first_table_number
 
     for record_batch in dataset.iter(batch_size=texts_per_table):
@@ -180,8 +151,8 @@ def main():
         batch_texts = batch_table.num_rows
         texts_total += batch_texts
 
-        if batch_texts == 0:
-            message = 'No more data available in the dataset.'
+        if batch_texts > max_texts:
+            message = 'The maximum number of texts has been reached.'
 
             print(message, flush=True)
             logger.info(message)

@@ -66,7 +66,7 @@ def twiga_index_creator(
     database_file_path: str,
     index_bins:         int
 ) -> bool:
-    """Create the index database schema with sharded hash tables in bin schemas."""
+    """Create the index database."""
 
     duckdb_index_connection = duckdb.connect()
 
@@ -81,12 +81,6 @@ def twiga_index_creator(
         """
     )
 
-    # Create a schema for each bin
-    for bin_number in range(1, index_bins + 1):
-        duckdb_index_connection.execute(
-            f"CREATE SCHEMA index.b_{str(bin_number)}"
-        )
-
     duckdb_index_connection.close()
 
     return True
@@ -97,7 +91,6 @@ def twiga_index_writer(
     text_id_list:             list,
     text_list:                list,
     index_bins:               int,
-    stopword_set:             set,
     hasher_batch_maximum:     int
 ) -> tuple[int, int]:
     """Tokenize, hash, and write index entries for a batch of texts."""
@@ -135,7 +128,6 @@ def twiga_index_writer(
         [
             word_tuple[0]
             for word_tuple in pre_tokenized_text
-            if word_tuple[0] not in stopword_set
         ]
         for pre_tokenized_text in pre_tokenized_texts
     ]
@@ -240,6 +232,9 @@ def twiga_index_writer(
 
     duckdb_index_connection.execute("COMMIT")
 
+    del word_counts_table
+    gc.collect()
+
     hashes_batch_list = twiga_dict_splitter(
         hashes,
         cpu_count()
@@ -301,19 +296,24 @@ def twiga_index_hasher(
         for word in word_list:
             word_hash = hashlib.blake2b(
                 word.encode(),
-                digest_size=32
+                digest_size=16
             ).hexdigest()
 
             text_word_hash_list.append(word_hash)
 
+        # Prepare word count record:
+        text_words_total = len(text_word_hash_list)
+        words_total += text_words_total
+
         words_count_record = {}
 
         words_count_record['text_id']     = int(text_id)
-        words_count_record['words_total'] = len(word_list)
+        words_count_record['words_total'] = text_words_total
 
         word_counts.append(words_count_record)
 
-        # Dictionary of lists:
+        # Dictionary of lists for
+        # the positions of each hashed word in the text:
         positions = {}
 
         for position, hashed_word in enumerate(text_word_hash_list):
@@ -322,9 +322,10 @@ def twiga_index_hasher(
 
             positions[hashed_word].append(position)
 
-        for hashed_word in text_word_hash_list:
-            words_total += 1
+        # Get the unique hashes in the text:
+        text_word_hash_set = set(text_word_hash_list)
 
+        for hashed_word in text_word_hash_set:
             hashed_word_record = {}
 
             bin_number = (int(hashed_word, 16) % index_bins) + 1
@@ -356,41 +357,26 @@ def twiga_index_table_writer(
 
         thread_duckdb_connection.execute("BEGIN TRANSACTION")
 
-        # Get unique hashes and their first 60 characters:
-        unique_bin_hashes_table = thread_duckdb_connection.sql(
-            """
-                SELECT
-                    hash,
-                    SUBSTRING(hash, 1, 60) AS hash_short
-                FROM bin_hashes_table
-                GROUP BY hash
-            """
-        ).fetch_arrow_table()
+        # Create table for this hash if it doesn't exist:
+        table_name = f"index.bin_{bin_number}"
 
-        # For each unique hash, create table if needed and insert:
-        for hash_row in unique_bin_hashes_table.to_pylist():
-            hash_full  = hash_row['hash']
-            hash_short = hash_row['hash_short']
+        thread_duckdb_connection.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                hash      VARCHAR USING COMPRESSION 'dictionary',
+                text_id   INTEGER,
+                positions INTEGER[]
+            )
+        """)
 
-            table_name = f"index.b_{bin_number}.h_{hash_short}"
-
-            # Create table for this hash if it doesn't exist:
-            thread_duckdb_connection.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_name} (
-                    text_id   INTEGER,
-                    positions INTEGER[]
-                )
-            """)
-
-            # Insert index entries:
-            thread_duckdb_connection.execute(f"""
-                INSERT INTO {table_name}
-                SELECT
-                    text_id,
-                    positions
-                FROM bin_hashes_table
-                WHERE hash = '{hash_full}'
-            """)
+        # Insert index entries:
+        thread_duckdb_connection.execute(f"""
+            INSERT INTO {table_name}
+            SELECT
+                hash,
+                text_id,
+                positions
+            FROM bin_hashes_table
+        """)
 
         thread_duckdb_connection.execute("COMMIT")
 

@@ -62,34 +62,33 @@ def twiga_text_reader(
     query_number = 0
 
     for bin_number, bin_text_id_list in bin_dict.items():
-        query_number += 1
+        for text_id in bin_text_id_list:
+            query_number += 1
 
-        text_id_string = ', '.join(map(str, set(bin_text_id_list)))
+            text_query += f"""
+                SELECT *
+                FROM texts_bin_{str(bin_number)}
+                WHERE text_id = {text_id}
+            """
 
-        text_query += f"""
-            SELECT *
-            FROM texts_bin_{str(bin_number)}
-            WHERE text_id IN ({text_id_string})
-        """
-
-        if query_number < len(bin_dict):
-            text_query += 'UNION'
+            if query_number < len(text_id_list):
+                text_query += 'UNION'
 
     text_table = duckdb_connection.sql(text_query).fetch_arrow_table()
 
     search_result_table = duckdb_connection.query(
-        """
+        f"""
             SELECT
                 tit.matching_words,
                 tit.words_total AS total_words,
-                tit.term_frequency,
+                tit.matching_words_frequency,
                 tt.* EXCLUDE (text),
                 tt.text
             FROM
                 text_id_table AS tit
                 LEFT JOIN text_table AS tt
                     ON tt.text_id = tit.text_id
-            ORDER BY tit.term_frequency DESC
+            ORDER BY tit.matching_words_frequency DESC
         """
     ).fetch_arrow_table()
 

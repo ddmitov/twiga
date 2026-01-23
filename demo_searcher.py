@@ -17,7 +17,9 @@ import uvicorn
 # Twiga modules:
 from twiga_core_search import twiga_request_hasher
 from twiga_core_search import twiga_index_reader
-from twiga_core_search import twiga_searcher
+from twiga_core_search import twiga_single_word_searcher
+from twiga_core_search import twiga_any_position_searcher
+from twiga_core_search import twiga_exact_phrase_searcher
 from twiga_text        import twiga_text_reader
 
 # Start the application for local development at http://0.0.0.0:7860/ using:
@@ -35,63 +37,11 @@ duckdb_text_connection  = None
 # Load settings from .env file:
 load_dotenv(find_dotenv())
 
-# Stopwords:
-stopwords_bg_set = set(
-    [
-        'а', 'ако', 'ала', 'бе', 'без', 'беше', 'би', 'бил', 'била',
-        'били', 'било', 'близо', 'бъдат', 'бъде', 'бяха', 'в', 'вас',
-        'ваш', 'ваша', 'вече', 'ви', 'вие', 'все', 'всеки', 'всички',
-        'всичко', 'всяка', 'във', 'въпреки', 'върху', 'г', 'ги', 'го',
-        'дали', 'до', 'докато', 'докога', 'дори', 'досега', 'доста',
-        'друг', 'друга', 'други', 'е', 'едва', 'ето', 'за', 'зад',
-        'заедно', 'заради', 'засега', 'затова', 'защо', 'защото', 'и',
-        'из', 'или', 'им', 'има', 'имат', 'иска', 'й', 'как', 'каква',
-        'какво', 'както', 'какъв', 'като', 'кога', 'когато', 'което',
-        'които', 'кой', 'който', 'колко', 'която', 'къде', 'където',
-        'към', 'ли', 'м', 'ме', 'между', 'мен', 'ми', 'му', 'н', 'на',
-        'над',  'най', 'например', 'нас', 'него', 'нещо', 'нея',
-        'ни', 'ние', 'никой', 'нито', 'нищо', 'но', 'някои', 'някой',
-        'няколко', 'няма', 'обаче', 'около', 'освен', 'особено', 'от',
-        'отгоре', 'отново', 'още', 'пак', 'по', 'повече', 'повечето',
-        'под', 'поне', 'поради', 'после', 'почти', 'пред', 'преди',
-        'през', 'при', 'пък', 'пъти', 'с', 'са', 'само', 'се', 'сега',
-        'си', 'скоро', 'след', 'сме', 'според', 'сред', 'срещу', 'сте',
-        'съм', 'със', 'също', 'т', 'тази', 'така', 'такива', 'такъв',
-        'там', 'те', 'тези', 'ти', 'то', 'това', 'тогава', 'този', 'той',
-        'толкова', 'точно', 'тук', 'тъй', 'тя', 'тях', 'у', 'ч', 'часа',
-        'че', 'чрез', 'ще', 'щом', 'я'
-    ]
-)
-
-stopwords_en_set = set(
-    [
-        'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am',
-        'an', 'and', 'any', 'are', 'aren', 'as', 'at', 'be', 'because',
-        'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
-        'can', 'cannot', 'could', 'couldn', 'did', 'didn', 'do', 'does',
-        'doesn', 'doing', 'don', 'down', 'during', 'each', 'few', 'for',
-        'from', 'further', 'had', 'hadn', 'has', 'hasn', 'have', 'having',
-        'he', 'he', 'her', 'here', 'hers', 'herself', 'him', 'himself',
-        'his', 'how', 'how', 'i', 'if', 'in', 'into', 'is', 'isn', 'it',
-        'its', 'itself', 'll', 'me', 'more', 'most', 'mustn', 'my',
-        'myself', 'nor', 'not', 'of', 'off', 'on', 'once', 'only', 'or',
-        'other', 'ought', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
-        're', 'same', 'shan', 'she', 'should', 'shouldn', 'so', 'some',
-        'such', 'than', 'that', 'the', 'their', 'theirs', 'them',
-        'themselves', 'then', 'there', 'these', 'they', 'this', 'those',
-        'through', 't', 'to', 'too', 'under', 'until', 'up', 've', 'very',
-        'was', 'wasn', 'we', 'were', 'weren', 'what', 'when', 'where',
-        'which', 'while', 'who', 'whom', 'why', 'with', 'won', 'would',
-        'wouldn', 'you', 'your', 'yours', 'yourself', 'yourselves'
-    ]
-)
-
-stopword_set = stopwords_bg_set | stopwords_en_set
-
 
 def text_searcher(
     search_request: str,
-    results_number: str
+    results_number: str,
+    search_method: str = 'exact_phrase'
 ) -> tuple[dict, dict]:
     """
     Search for texts matching a search query.
@@ -103,6 +53,9 @@ def text_searcher(
         search_request: The search query containing one or more words.
         results_number: Maximum number of search results to return.
             Use "All" or "0" for unlimited results.
+        search_method: The search method to use - either 'exact_phrase' or 'any_position'.
+            'exact_phrase' finds texts with consecutive word sequences.
+            'any_position' finds texts with words in any order.
 
     Returns:
         A tuple containing:
@@ -114,8 +67,6 @@ def text_searcher(
     global last_activity
     last_activity = time.time()
 
-    global stopword_set
-
     # Convert results_number to int (handle "All" option):
     if str(results_number).lower() == 'all':
         max_results = 0
@@ -123,7 +74,7 @@ def text_searcher(
         max_results = int(results_number)
 
     # Hash the search request:
-    hash_list = twiga_request_hasher(search_request, stopword_set)
+    hash_list = twiga_request_hasher(search_request)
 
     # Read the hashed words index data:
     index_reading_start = time.time()
@@ -147,14 +98,33 @@ def text_searcher(
     search_start = time.time()
 
     text_id_table = None
+    used_search_function = None
 
     if hash_table is not None:
-        text_id_table = twiga_searcher(
-            duckdb_index_connection,
-            hash_table,
-            hash_id_list,
-            max_results
-        )
+        # Check if it's a single-word search
+        if len(hash_id_list) == 1:
+            text_id_table = twiga_single_word_searcher(
+                duckdb_index_connection,
+                hash_table,
+                max_results
+            )
+            used_search_function = 'single_word'
+        elif search_method == 'any_position':
+            text_id_table = twiga_any_position_searcher(
+                duckdb_index_connection,
+                hash_table,
+                hash_id_list,
+                max_results
+            )
+            used_search_function = 'any_position'
+        else:  # default to 'exact_phrase'
+            text_id_table = twiga_exact_phrase_searcher(
+                duckdb_index_connection,
+                hash_table,
+                hash_id_list,
+                max_results
+            )
+            used_search_function = 'exact_phrase'
 
     search_time = round((time.time() - search_start), 3)
 
@@ -198,10 +168,17 @@ def text_searcher(
 
     info = {}
 
-    info['twiga_index_reader() ... runtime in seconds'] = index_reading_time
-    info['twiga_searcher() ....... runtime in seconds'] = search_time
-    info['twiga_text_reader() .... runtime in seconds'] = text_extraction_time
-    info['Twiga functions total .. runtime in seconds'] = total_time
+    info['twiga_index_reader() ........... runtime in seconds'] = index_reading_time
+
+    if used_search_function == 'single_word':
+        info['twiga_single_word_searcher() ... runtime in seconds'] = search_time
+    elif used_search_function == 'any_position':
+        info['twiga_any_position_searcher() .. runtime in seconds'] = search_time
+    else:
+        info['twiga_exact_phrase_searcher() .. runtime in seconds'] = search_time
+
+    info['twiga_text_reader() ............ runtime in seconds'] = text_extraction_time
+    info['Twiga functions total .......... runtime in seconds'] = total_time
 
     return info, search_result
 
@@ -237,14 +214,12 @@ def mcp_search(query: str, max_results: int = 10) -> list[dict]:
     # Update the timestamp of the last activity:
     global last_activity
     last_activity = time.time()
-    
-    global stopword_set
 
     # Validate max_results (0 means unlimited, negative becomes 0):
     max_results = max(0, max_results)
 
     # Hash the search request:
-    hash_list = twiga_request_hasher(search_request, stopword_set)
+    hash_list = twiga_request_hasher(search_request)
 
     # Use the global DuckDB connections:
     global duckdb_index_connection
@@ -264,7 +239,7 @@ def mcp_search(query: str, max_results: int = 10) -> list[dict]:
     text_id_table = None
 
     if hash_table is not None:
-        text_id_table = twiga_searcher(
+        text_id_table = twiga_exact_phrase_searcher(
             duckdb_index_connection,
             hash_table,
             hash_id_list,
@@ -353,6 +328,12 @@ def main():
         ['10', '20', '50', 'All'],
         label='Maximum Number of Search Results',
         value='10'
+    )
+
+    search_method_radio = gr.Radio(
+        ['exact_phrase', 'any_position'],
+        label='Search Method',
+        value='exact_phrase'
     )
 
     info_box = gr.JSON(label='Search Info', show_label=True)
@@ -448,12 +429,14 @@ def main():
             with gr.Column(scale=1):
                 results_number.render()
 
+            with gr.Column(scale=1):
+                search_method_radio.render()
+
             with gr.Column(scale=3):
                 gr.Examples(
                     [
                         'international trade relations',
-                        'international humanitarian aid',
-                        'virtual learning',
+                        'used car market report',
                         'renewable energy sources',
                         'global economic outlook',
                         'околна среда'
@@ -485,7 +468,7 @@ def main():
         gr.on(
             triggers=[request_box.submit, search_button.click],
             fn=text_searcher,
-            inputs=[request_box, results_number],
+            inputs=[request_box, results_number, search_method_radio],
             outputs=[info_box, results_box],
         )
 

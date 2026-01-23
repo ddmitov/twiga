@@ -12,8 +12,6 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 - [x] Index data stored entirely in standard SQL tables
 
-- [ ] Usability in a variety of SQL-driven systems
-
 ## Features
 
 - [x] Twiga is language-agnostic, different languages can coexist in a single index.
@@ -26,13 +24,13 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 - Each word is hashed and its position is saved in a table, part of a partitioned index.
 
-## Searching Workflow
+## Search Workflow
 
 - Every search requests is converted into hashes of words.
 
 - Only small part of the index tables are contacted during search.
 
-- Search and ranking are performed using vanilla DuckDB SQL with no use of DuckDB extensions.
+- Search and ranking are performed using vanilla DuckDB SQL without any DuckDB extensions.
 
 ## Word Definition
 
@@ -47,7 +45,7 @@ Twiga returns text IDs that match the following criteria:
 
 ## Ranking Criterion
 
-Term frequency is the ranking criterion. It is defined as the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
+Matching words frequency is the ranking criterion. It is defined as the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
 
 ## Name
 
