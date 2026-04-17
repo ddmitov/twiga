@@ -24,18 +24,17 @@ Twiga uses a **bin-sharding architecture** in DuckDB that distributes hash entri
 
 Located in the `data/` directory, this database contains the core index structure:
 
-#### Core Index Tables
+#### Word Counts Table (`word_counts`)
 
-**`word_counts` Table**
-- Stores aggregate statistics for each indexed text
+- Stores word counts for each indexed text
 - Columns:
   - `text_id` (INTEGER PRIMARY KEY): Unique identifier for each text
   - `words_total` (INTEGER): Total number of indexed words (after stopword removal)
-- Used for relevance scoring and document normalization during search ranking
+- Used for relevance scoring during search ranking
 
 #### Hash Index Bin Tables (`bin_*`)
 
-The core indexing structure using bin-sharding for distributed storage:
+The core indexing structure uses bin-sharding for distributed storage:
 
 - **Table Naming**: `bin_1`, `bin_2`, ... `bin_N`
 - **Bin Assignment**: `bin_number = (int(hash_value, 16) % index_bins) + 1`
@@ -104,7 +103,7 @@ Matching words frequency is the ranking criterion. It is defined as the number o
 
 ## Limitations
 
-Twiga is a lexical search experiment with a focused scope. Users should be aware of the following limitations:
+Twiga is a lexical search experiment with a focused scope having the following limitations:
 
 - **No Stopword Removal**: Common words are indexed equally with less common words.
 - **AND Logic Only**: All search words must be present in the results, Boolean OR and NOT are not supported.
