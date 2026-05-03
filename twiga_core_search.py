@@ -46,7 +46,13 @@ def twiga_index_reader(
     index_bins:        int,
     request_hash_list: list
 ) -> tuple[None, None] | tuple[list, pa.Table]:
-    """Look up hash entries from sharded bins and return matching index data."""
+    """
+    Look up hash entries:
+    low-frequency bins first, then high-frequency tables.
+
+    Priority: Read low-frequency hashes from bins, find texts with all of them,
+    then extract high-frequency hashes only for those texts.
+    """
 
     if len(request_hash_list) == 0:
         return None, None
@@ -54,42 +60,143 @@ def twiga_index_reader(
     # Get unique hashes only:
     hash_set = set(request_hash_list)
 
-    # Create a mapping of each hash to its index in the original list of request hashes.
-    # This is needed to minimize the memory overhead of passing the hashes to the searcher function.
-    mapping_dict = {hash_item: index for index, hash_item in enumerate(hash_set)}
+    # Create a mapping of
+    # each hash to its index in the original list of request hashes:
+    mapping_dict = {
+        hash_item: index for index, hash_item in enumerate(hash_set)
+    }
 
-    # Map each hash to its corresponding bin:
-    bin_dict = {}
+    # Determine which hashes are high-frequency vs low-frequency:
+    try:
+        high_frequency_check = duckdb_connection.execute(
+            """
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_name = 'high_frequency_hashes'
+            """
+        ).fetchone()
 
-    for hash_item in hash_set:
+        if high_frequency_check[0] > 0:
+            high_frequency_result = duckdb_connection.execute(
+                f"""
+                    SELECT DISTINCT hash
+                    FROM high_frequency_hashes
+                    WHERE hash IN (
+                        {','.join(repr(hash_item) for hash_item in hash_set)}
+                    )
+                """
+            ).fetchall()
+
+            high_frequency_hashes = set(
+                row[0] for row in high_frequency_result
+            )
+        else:
+            high_frequency_hashes = set()
+    except:
+        high_frequency_hashes = set()
+
+    low_frequency_hashes = hash_set - high_frequency_hashes
+
+    # Query low-frequency hashes from bin tables:
+    low_freq_query = ''
+    query_number   = 0
+
+    for hash_item in low_frequency_hashes:
         bin_number = (int(hash_item, 16) % index_bins) + 1
+        query_number += 1
 
-        if bin_number not in bin_dict:
-            bin_dict[bin_number] = []
+        low_freq_query += f"""
+            SELECT
+                {mapping_dict[hash_item]} AS hash_id,
+                text_id,
+                positions
+            FROM bin_{bin_number}
+            WHERE hash = '{hash_item}'
+        """
 
-        bin_dict[bin_number].append(hash_item)
+        if query_number < len(low_frequency_hashes):
+            low_freq_query += 'UNION'
 
-    # Compose and execute the query to retrieve hash entries from all bins:
-    hash_query   = ''
-    query_number = 0
+    # Get low-frequency results:
+    if low_freq_query:
+        low_freq_table = duckdb_connection.sql(
+            low_freq_query
+        ).fetch_arrow_table()
 
-    for bin_number, hash_list in bin_dict.items():
-        for hash_item in hash_list:
+        # Identify texts that contain ALL required low-frequency hashes:
+        texts_with_all_low_query = f"""
+            SELECT DISTINCT text_id
+            FROM low_freq_table
+            GROUP BY text_id
+            HAVING COUNT(DISTINCT hash_id) = {len(low_frequency_hashes)}
+        """
+
+        texts_with_all_low = duckdb_connection.sql(
+            texts_with_all_low_query
+        ).fetch_arrow_table()
+
+        if texts_with_all_low.num_rows == 0:
+            return None, None
+
+        text_ids_list = texts_with_all_low['text_id'].to_pylist()
+        text_ids_str  = ','.join(str(text_id) for text_id in text_ids_list)
+        result_tables = [low_freq_table]
+
+    elif len(low_frequency_hashes) > 0:
+        # Low-frequency hashes were required but none found:
+        return None, None
+    else:
+        # No low-frequency hashes - all are high-frequency:
+        text_ids_list = None
+        text_ids_str  = None
+        result_tables = []
+
+    # Query high-frequency hashes only for qualifying texts:
+    if high_frequency_hashes:
+        high_frequency_query = ''
+        query_number         = 0
+
+        for hash_item in high_frequency_hashes:
             query_number += 1
 
-            hash_query += f"""
-                SELECT
-                    {mapping_dict[hash_item]} AS hash_id,
-                    text_id,
-                    positions
-                FROM bin_{bin_number}
-                WHERE hash = '{hash_item}'
-            """
+            if text_ids_list is not None:
+                # Get only high-frequency hashes
+                # for texts that have all low-frequency hashes:
+                high_frequency_query += f"""
+                    SELECT
+                        {mapping_dict[hash_item]} AS hash_id,
+                        text_id,
+                        positions
+                    FROM hash_{hash_item}
+                    WHERE text_id IN ({text_ids_str})
+                """
+            else:
+                # No low-frequency hashes, get all high-frequency hash data:
+                high_frequency_query += f"""
+                    SELECT
+                        {mapping_dict[hash_item]} AS hash_id,
+                        text_id,
+                        positions
+                    FROM hash_{hash_item}
+                """
 
-            if query_number < len(hash_set):
-                hash_query += 'UNION'
+            if query_number < len(high_frequency_hashes):
+                high_frequency_query += 'UNION'
 
-    hash_table = duckdb_connection.sql(hash_query).fetch_arrow_table()
+        high_frequency_table = \
+            duckdb_connection.sql(high_frequency_query).fetch_arrow_table()
+
+        result_tables.append(high_frequency_table)
+
+    # Combine low and high-frequency results:
+    if len(result_tables) > 0:
+        if len(result_tables) == 1:
+            hash_table = result_tables[0]
+        else:
+            hash_table = pa.concat_tables(result_tables)
+
+    else:
+        return None, None
 
     # Reconstruct the list of hash IDs in the order of the original request:
     hash_id_list = [mapping_dict[hash_item] for hash_item in request_hash_list]
@@ -157,7 +264,7 @@ def twiga_any_position_searcher(
 
     search_query = f"""
         WITH
-            -- Step 1. Keep only texts that contain all required hashes:
+            -- Keep only texts that contain all required hashes:
             texts_with_all_hashes AS (
                 SELECT text_id
                 FROM hash_table
@@ -165,18 +272,18 @@ def twiga_any_position_searcher(
                 HAVING COUNT(DISTINCT(hash_id)) = {str(len(set(hash_id_list)))}
             ),
 
-            -- Step 2. Count the number of positions:
+            -- Count the number of positions:
             positions AS (
                 SELECT
                     ht.hash_id,
                     ht.text_id,
                     LENGTH(ht.positions) AS positions_number
-                FROM hash_table AS ht  
+                FROM hash_table AS ht
                     INNER JOIN texts_with_all_hashes AS twa
                         ON twa.text_id = ht.text_id
             )
 
-        -- Step 3. Score texts by total number of matching words:
+        -- Score texts by total number of matching words:
         SELECT
             p.text_id,
             SUM(p.positions_number) AS matching_words,
@@ -217,11 +324,13 @@ def twiga_exact_phrase_searcher(
     # Build LIMIT clause only if results_number > 0:
     limit_clause = f'LIMIT {str(results_number)}' if results_number > 0 else ''
 
-    request_sequence_string = ''.join(map(str, hash_id_list))
+    # Build request sequence with delimiter to avoid ambiguity
+    # (e.g., "01" vs "0,1"):
+    request_sequence_string = ','.join(map(str, hash_id_list))
 
     search_query = f"""
         WITH
-            -- Step 1. Keep only texts that contain all required hashes:
+            -- Keep only texts that contain all required hashes:
             texts_with_all_hashes AS (
                 SELECT text_id
                 FROM hash_table
@@ -229,18 +338,18 @@ def twiga_exact_phrase_searcher(
                 HAVING COUNT(DISTINCT(hash_id)) = {str(len(set(hash_id_list)))}
             ),
 
-            -- Step 2. Flatten position arrays into individual rows:
+            -- Flatten position arrays into individual rows:
             positions AS (
                 SELECT
                     ht.hash_id,
                     ht.text_id,
                     UNNEST(ht.positions) AS position
-                FROM hash_table AS ht  
+                FROM hash_table AS ht
                     INNER JOIN texts_with_all_hashes AS twa
                         ON twa.text_id = ht.text_id
             ),
 
-            -- Step 3. Define sequence groups using ROW_NUMBER().
+            -- Define sequence groups using ROW_NUMBER().
             -- ROW_NUMBER() - position is constant for consecutive positions:
             sequences AS (
                 SELECT
@@ -254,11 +363,13 @@ def twiga_exact_phrase_searcher(
                 FROM positions
             ),
 
-            -- Step 4. Build sequence strings for every sequence:
+            -- Build sequence strings for every sequence using delimiter:
             sequences_by_text AS (
                 SELECT
                     text_id,
-                    STRING_AGG(hash_id, '' ORDER BY position) AS sequence
+                    STRING_AGG(
+                        CAST(hash_id AS VARCHAR), ',' ORDER BY position
+                    ) AS sequence
                 FROM sequences
                 GROUP BY
                     text_id,
@@ -266,7 +377,7 @@ def twiga_exact_phrase_searcher(
                 HAVING COUNT(hash_id) = {str(len(hash_id_list))}
             )
 
-        -- Step 5. Match sequences containing the search pattern:
+        -- Match sequences containing the search pattern:
         SELECT
             sbt.text_id,
             COUNT(sbt.sequence) * {str(len(hash_id_list))} AS matching_words,

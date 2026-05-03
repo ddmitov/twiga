@@ -34,22 +34,47 @@ Located in the `data/` directory, this database contains the core index structur
 
 #### Hash Index Bin Tables (`bin_*`)
 
-The core indexing structure uses bin-sharding for distributed storage:
+The bin-sharding structure stores **low-frequency hashes** distributed across multiple tables for scalability:
 
 - **Table Naming**: `bin_1`, `bin_2`, ... `bin_N`
 - **Bin Assignment**: `bin_number = (int(hash_value, 16) % index_bins) + 1`
-- **Purpose**: Store all word hash occurrences with their document positions for quick lookup
+- **Purpose**: Store low-frequency word hashes (those appearing in ≤10% of documents) with their document positions
+- **Optimization**: High-frequency hashes are moved to separate `hash_*` tables (see below)
 
 Each `bin_*` table contains:
-- `hash` (VARCHAR, dictionary-compressed): BLAKE2b-256 hash of the original word (32 hex characters, typically 64 characters total)
+- `hash` (VARCHAR, dictionary-compressed): BLAKE2b-256 hash of the original word
 - `text_id` (INTEGER): Reference to source document (foreign key to `word_counts.text_id`)
-- `positions` (INTEGER[]): Array of zero-indexed word positions within the text, used for phrase queries and proximity calculations
+- `positions` (INTEGER[]): Array of zero-indexed word positions within the text
 
 **Bin-Sharding Benefits:**
 - **Scalability**: Distributes data across tables, reducing per-table size
 - **Parallelism**: Multiple bins can be queried concurrently
 - **Memory Efficiency**: Smaller working sets during indexing
 - **Maintenance**: Specific bins can be rebuilt independently
+- **Query Optimization**: Separating high-frequency hashes reduces data volume in bins
+
+#### High-Frequency Hashes Tables (`hash_*`)
+
+This optimization identifies and separates **high-frequency hashes** into dedicated tables.  
+A high-frequency hash is a hash appearing in >10% of all documents in the index.
+
+- **Table Naming**: `hash_<BLAKE2b_hash>` (one table per high-frequency hash)
+- **Purpose**: Store high-frequency hash occurrences separately for efficient filtering
+- **Optimization Strategy**: High-frequency hashes are only queried after confirming a document contains all required low-frequency hashes
+
+Each `hash_*` table contains:
+- `hash` (VARCHAR): The high-frequency hash value
+- `text_id` (INTEGER): Reference to source document
+- `positions` (INTEGER[]): Array of word positions within the text
+
+#### High-Frequency Hashes Metadata Table (`high_frequency_hashes`)
+
+Metadata table tracking all high-frequency hashes identified during optimization:
+
+- `hash` (VARCHAR PRIMARY KEY): The high-frequency hash
+- `document_count` (INTEGER): Number of documents containing this hash
+- `document_percentage` (DOUBLE): Percentage of total documents containing this hash
+- `table_name` (VARCHAR): Name of the corresponding `hash_*` table
 
 ### Text Database (`twiga_texts.duckdb`)
 
@@ -69,10 +94,14 @@ Each `bin_*` table contains:
 
 #### Search Process (`twiga_core_search.py`)
 
-1. **Request Hashing**: Same normalization/tokenization as indexing
-2. **Bin Lookup**: Calculate which bin(s) contain each search term hash
-3. **Parallel Queries**: Query relevant bins using UNION
-4. **Result Assembly**: Combine results with original request order mapping
+Implements a two-tier search strategy optimized for mixed-frequency queries:
+
+1. **Request Hashing**: Normalize, tokenize, and hash search terms (same as indexing)
+2. **Hash Classification**: Separate search hashes into low-frequency (from bins) and high-frequency (from `hash_*` tables)
+3. **Low-Frequency Query**: Query relevant `bin_*` tables for all low-frequency search hashes
+4. **Document Filtering**: Identify documents containing ALL required low-frequency hashes
+5. **High-Frequency Query**: Query `hash_*` tables only for high-frequency hashes in qualifying documents (if any)
+6. **Result Assembly**: Combine low and high-frequency results, maintaining original request order
 
 ### Performance Characteristics
 
@@ -82,9 +111,19 @@ Each `bin_*` table contains:
 - Multiple threads write to different bins with no contention
 
 **Query Performance:**
-- Single search may touch multiple bins
+- Two-tier strategy minimizes data scanned for high-frequency terms
+- Low-frequency hashes narrow document set before querying high-frequency tables
+- High-frequency hash queries benefit from dedicated, smaller tables
 - UNION queries combine results efficiently
 - Hash mapping optimizes result ordering
+
+**Optimization Process (`twiga_index_optimizer.py`):**
+1. Analyzes hash distribution across all documents
+2. Identifies high-frequency hashes (>10% document coverage)
+3. Creates dedicated `hash_*` tables for each high-frequency hash
+4. Generates `high_frequency_hashes` metadata table
+5. Removes high-frequency entries from bin tables
+6. Reorders remaining bin tables by hash for cache locality
 
 ## Word Definition
 

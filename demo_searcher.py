@@ -435,11 +435,12 @@ def main():
             with gr.Column(scale=3):
                 gr.Examples(
                     [
+                        'околна среда',
                         'international trade relations',
                         'used car market report',
                         'renewable energy sources',
                         'global economic outlook',
-                        'околна среда'
+                        'head of the European Central Bank',
                     ],
                     fn=text_searcher,
                     inputs=request_box,
