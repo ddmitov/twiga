@@ -8,7 +8,7 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 ## Design Objectives
 
-- [x] Fast subsecond lexical search across a large number of texts
+- [ ] Subsecond lexical search across a large number of texts
 
 - [x] Index data stored entirely in standard DuckDB tables
 
@@ -56,11 +56,11 @@ Each `bin_*` table contains:
 #### High-Frequency Hashes Tables (`hash_*`)
 
 This optimization identifies and separates **high-frequency hashes** into dedicated tables.  
-A high-frequency hash is a hash appearing in >10% of all documents in the index.
+A high-frequency word hash is a word hash appearing in >10% of all documents in the index.
 
 - **Table Naming**: `hash_<BLAKE2b_hash>` (one table per high-frequency hash)
-- **Purpose**: Store high-frequency hash occurrences separately for efficient filtering
-- **Optimization Strategy**: High-frequency hashes are only queried after confirming a document contains all required low-frequency hashes
+- **Purpose**: Store high-frequency hash occurrences separately for efficient filtering.
+- **Optimization Strategy**: High-frequency hashes are only queried after confirming a document contains all required low-frequency hashes, if any.
 
 Each `hash_*` table contains:
 - `hash` (VARCHAR): The high-frequency hash value
@@ -91,6 +91,8 @@ Metadata table tracking all high-frequency hashes identified during optimization
 3. **Hashing** (multiprocessing): BLAKE2b with 16-byte digest, words hashed independently, position tracking maintained
 4. **Bin Assignment**: Hash modulo determines bin distribution
 5. **Batch Writing**: Insertion into respective `bin_*` tables
+
+Example: 3 100 860 texts having a total of 1 521 483 534 non-unique words were indexed for 8 hours 13 minutes 36 seconds.
 
 #### Search Process (`twiga_core_search.py`)
 
@@ -125,6 +127,8 @@ Implements a two-tier search strategy optimized for mixed-frequency queries:
 5. Removes high-frequency entries from bin tables
 6. Reorders remaining bin tables by hash for cache locality
 
+Example: Optimization of an index with 3 100 860 text items and a total of 1 521 483 534 non-unique words took 1 hour 48 minutes 25 seconds.
+
 ## Word Definition
 
 A word is any sequence of Unicode lowercase alphanumeric characters between two whitespaces.
@@ -148,6 +152,13 @@ Twiga is a lexical search experiment with a focused scope having the following l
 - **AND Logic Only**: All search words must be present in the results, Boolean OR and NOT are not supported.
 - **No Wildcard or Fuzzy Search**: Pattern matching and typo tolerance are not implemented.
 - **No Proximity Search**: Cannot search for words within a specific distance of each other.
+
+## Limiting Factors
+
+These are the most important factors limiting the performance of the search architecture implemented in Twiga:
+
+- **High-Frequency Words**: Stopwords and all other high-frequency words in a search request increase significantly the search latency, especially when a search request is composed only of high-frequency words. While most search requests having 6 words or less are completed with a sub-second latency even in exact phrase mode, some search requests composed entirely of high-frequency words can take up to 4 seconds.
+- **Number of Indexed Texts**: The largest index used by Twiga has 3 100 860 text entries with a sum of 1 521 483 534 non-unique words. Larger indexes are technically possible, but they will have larger tables of high-frequency words further increasing the search latency.
 
 ## Name
 

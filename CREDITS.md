@@ -17,7 +17,6 @@ https://arrow.apache.org/docs/python/api.html
 https://duckdb.org/docs/  
 https://huggingface.co/docs/datasets/index  
 https://huggingface.co/docs/tokenizers/index  
-https://min.io/docs/minio/linux/developers/python/API.html  
 https://www.gradio.app/docs  
 
 ## Dataset
@@ -31,7 +30,7 @@ https://stackoverflow.com/questions/2564137/how-to-terminate-a-thread-when-main-
 
 ## AI
 
-https://claude.ai/  
+https://claude.ai/ (Haiku, Sonnet)  
 
 ## Icon
 

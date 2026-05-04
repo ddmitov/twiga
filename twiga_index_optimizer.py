@@ -302,7 +302,7 @@ def remove_high_frequency_hashes_from_bins(
 
         cursor.execute("BEGIN TRANSACTION")
 
-        # Delete high-frequency hashes from bin table iteratively
+        # Delete high-frequency hashes from bin table iteratively:
         for hash_item in high_frequency_hashes:
             cursor.execute(
                 f"""
@@ -407,7 +407,7 @@ def main():
     # Get the number of bin tables:
     bin_tables = int(os.environ['INDEX_BINS'])
 
-    # STEP 1: Calculate total number of documents
+    # STEP 1: Calculate the total number of documents:
     message = "Starting index optimization process ..."
 
     print(message, flush=True)
@@ -420,7 +420,7 @@ def main():
     print(message, flush=True)
     logger.info(message)
 
-    # STEP 2: Calculate hash frequencies
+    # STEP 2: Calculate the hash frequencies:
     message = "Step 2: Calculating hash frequencies ..."
 
     print(message, flush=True)
@@ -436,7 +436,7 @@ def main():
     print(message, flush=True)
     logger.info(message)
 
-    # STEP 3: Identify high-frequency hashes
+    # STEP 3: Identify high-frequency hashes:
     message = "Step 3: Identifying high-frequency hashes ..."
 
     print(message, flush=True)
@@ -454,7 +454,7 @@ def main():
     logger.info(message)
 
     if high_frequency_hashes:
-        # STEP 4: Create high_frequency_hashes metadata table
+        # STEP 4: Create high_frequency_hashes metadata table:
         message = "Step 4: Creating high_frequency_hashes metadata table..."
 
         print(message, flush=True)
@@ -483,7 +483,7 @@ def main():
 
             raise
 
-        # STEP 5: Create separate tables for high-frequency hashes
+        # STEP 5: Create separate tables for high-frequency hashes:
         message = "Step 5: Creating tables for high-frequency hashes ..."
 
         print(message, flush=True)
@@ -521,7 +521,7 @@ def main():
 
             raise
 
-        # STEP 6: Remove high-frequency hashes from bin tables
+        # STEP 6: Remove high-frequency hashes from bin tables:
         message = "Step 6: Removing high-frequency hashes from bin tables..."
         print(message, flush=True)
         logger.info(message)
@@ -547,7 +547,7 @@ def main():
 
             raise
 
-    # STEP 7: Reorder remaining bin tables
+    # STEP 7: Reorder remaining bin tables:
     message = "Step 7: Reordering remaining bin tables..."
     print(message, flush=True)
     logger.info(message)
@@ -597,7 +597,7 @@ def main():
     duckdb_connection.execute("CHECKPOINT index")
     duckdb_connection.close()
 
-    # Print final summary
+    # Print final summary:
     print("\n=== OPTIMIZATION SUMMARY ===", flush=True)
     logger.info("=== OPTIMIZATION SUMMARY ===")
 
@@ -609,7 +609,7 @@ def main():
     print(message, flush=True)
     logger.info(message)
 
-    message = f"High-frequency hashes (>1%): {stats['high_frequency_hashes']}"
+    message = f"High-frequency hashes: {stats['high_frequency_hashes']}"
     print(message, flush=True)
     logger.info(message)
 

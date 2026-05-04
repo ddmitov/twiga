@@ -183,86 +183,6 @@ def text_searcher(
     return info, search_result
 
 
-def mcp_search(query: str, max_results: int = 10) -> list[dict]:
-    """
-    Search for texts matching a query (MCP tool for LLMs).
-
-    This is a simplified search interface designed for use as an MCP tool
-    by Large Language Models. It returns search results in a flat list format
-    that is easier for LLMs to process.
-
-    Args:
-        query: The search query containing one or more words.
-            Example: "climate" or "climate change effects".
-        max_results: Maximum number of results to return (default: 10).
-            Use 0 for unlimited results.
-
-    Returns:
-        A list of dictionaries, each containing:
-        - title: The title of the matching text
-        - date: Publication date of the text
-        - text: The full text content
-        - matching_words: Number of matching words found
-        - total_words: Total words in the text
-        - term_frequency: Ratio of matching to total words
-
-    Example:
-        >>> mcp_search("artificial intelligence", max_results=5)
-        [{"title": "AI Research Paper", "date": "2024-01-15", "text": "...", ...}]
-    """
-
-    # Update the timestamp of the last activity:
-    global last_activity
-    last_activity = time.time()
-
-    # Validate max_results (0 means unlimited, negative becomes 0):
-    max_results = max(0, max_results)
-
-    # Hash the search request:
-    hash_list = twiga_request_hasher(search_request)
-
-    # Use the global DuckDB connections:
-    global duckdb_index_connection
-    global duckdb_text_connection
-
-    index_bins = int(os.environ['INDEX_BINS'])
-    text_bins = int(os.environ['TEXT_BINS'])
-
-    # Read the hashed words index data:
-    hash_id_list, hash_table = twiga_index_reader(
-        duckdb_index_connection,
-        index_bins,
-        hash_list
-    )
-
-    # Search:
-    text_id_table = None
-
-    if hash_table is not None:
-        text_id_table = twiga_exact_phrase_searcher(
-            duckdb_index_connection,
-            hash_table,
-            hash_id_list,
-            max_results
-        )
-
-    # No results found:
-    if text_id_table is None:
-        return [{"message": "No matching texts were found."}]
-
-    # Extract matching texts:
-    search_result_table = twiga_text_reader(
-        duckdb_text_connection,
-        text_bins,
-        text_id_table
-    )
-
-    # Convert to list of dictionaries:
-    results = search_result_table.to_pandas().to_dict('records')
-
-    return results
-
-
 def activity_inspector():
     """Self-rescheduling timer that terminates the app after prolonged inactivity."""
 
@@ -293,13 +213,6 @@ def main():
 
     # Disable Gradio telemetry:
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
-
-    # Check if MCP server is enabled:
-    mcp_enabled = os.environ.get('MCP_SERVER_ENABLED', 'false').lower() == 'true'
-
-    # Set Gradio MCP server environment variable:
-    if mcp_enabled:
-        os.environ['GRADIO_MCP_SERVER'] = 'True'
 
     # Initialize DuckDB connections:
     global duckdb_index_connection
@@ -473,14 +386,7 @@ def main():
             outputs=[info_box, results_box],
         )
 
-        # Register MCP-only search function for LLM tool integration:
-        # This function is not visible in the UI but is exposed via the MCP server
-        # at /gradio_api/mcp/sse for use by LLM clients.
-        if mcp_enabled:
-            gr.api(mcp_search)
-
-    gradio_interface.show_api = mcp_enabled
-    gradio_interface.ssr_mode = False
+    gradio_interface.show_api = False
     gradio_interface.queue()
 
     fastapi_app = FastAPI()
@@ -500,12 +406,6 @@ def main():
     # i.e. when there is no user activity for a predefined amount of time
     # the application will shut down.
     activity_inspector()
-
-    # Print MCP server status:
-    if mcp_enabled:
-        print('\nMCP server enabled!')
-        print('MCP endpoint: http://0.0.0.0:7860/gradio_api/mcp/sse')
-        print('MCP schema:   http://0.0.0.0:7860/gradio_api/mcp/schema\n')
 
     try:
         uvicorn.run(

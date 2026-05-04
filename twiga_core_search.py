@@ -68,30 +68,19 @@ def twiga_index_reader(
 
     # Determine which hashes are high-frequency vs low-frequency:
     try:
-        high_frequency_check = duckdb_connection.execute(
+        high_frequency_result = duckdb_connection.execute(
+            f"""
+                SELECT DISTINCT hash
+                FROM high_frequency_hashes
+                WHERE hash IN (
+                    {','.join(repr(hash_item) for hash_item in hash_set)}
+                )
             """
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                WHERE table_name = 'high_frequency_hashes'
-            """
-        ).fetchone()
+        ).fetchall()
 
-        if high_frequency_check[0] > 0:
-            high_frequency_result = duckdb_connection.execute(
-                f"""
-                    SELECT DISTINCT hash
-                    FROM high_frequency_hashes
-                    WHERE hash IN (
-                        {','.join(repr(hash_item) for hash_item in hash_set)}
-                    )
-                """
-            ).fetchall()
-
-            high_frequency_hashes = set(
-                row[0] for row in high_frequency_result
-            )
-        else:
-            high_frequency_hashes = set()
+        high_frequency_hashes = set(
+            row[0] for row in high_frequency_result
+        )
     except:
         high_frequency_hashes = set()
 
