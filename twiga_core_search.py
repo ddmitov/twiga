@@ -99,12 +99,12 @@ def twiga_index_reader(
 
     # Process hashes in pairs from highest to lowest:
     for hash_index in range(0, len(sorted_hashes_reversed), 2):
-        hash_item_1 = sorted_hashes_reversed[hash_index]
+        hash_item_1  = sorted_hashes_reversed[hash_index]
         bin_number_1 = (int(hash_item_1, 16) % index_bins) + 1
 
         if hash_index + 1 < len(sorted_hashes_reversed):
-            # We have a pair:
-            hash_item_2 = sorted_hashes_reversed[hash_index + 1]
+            # Hash pair:
+            hash_item_2  = sorted_hashes_reversed[hash_index + 1]
             bin_number_2 = (int(hash_item_2, 16) % index_bins) + 1
 
             pair_cte = f"""pair_{pair_index} AS (
@@ -116,6 +116,7 @@ def twiga_index_reader(
                 FROM bin_{bin_number_2}
                 WHERE hash = '{hash_item_2}'
             )"""
+
             cte_clauses.append(pair_cte)
             pair_index += 1
         else:
@@ -128,31 +129,35 @@ def twiga_index_reader(
             cte_clauses.append(odd_hash_cte)
 
     # Build the final INTERSECT combining all pairs and odd hash:
-    if pair_index > 0:
-        # We have at least one pair
-        intersect_parts = [
-            f"SELECT text_id FROM pair_{hash_index}"
-            for hash_index in range(pair_index)
-        ]
+    # Formatting of the SQL query is adapted for readability if printed.
+    intersect_parts = [
+        f"""SELECT text_id
+            FROM pair_{hash_index}"""
+        for hash_index in range(pair_index)
+    ]
 
-        if odd_hash_cte is not None:
-            intersect_parts.append("SELECT text_id FROM odd_hash")
+    if odd_hash_cte is not None:
+        intersect_parts.append(
+            """SELECT text_id
+            FROM odd_hash"""
+        )
 
-        final_intersect = " INTERSECT ".join(intersect_parts)
-        cte_clauses.append(f"final_result AS ({final_intersect})")
-    else:
-        # Only odd hash (single hash case):
-        cte_clauses.append("final_result AS (SELECT text_id FROM odd_hash)")
+    final_intersect = """
+            INTERSECT
+            """.join(intersect_parts)
 
     # Build the full query with CTEs:
     cte_string = ", ".join(cte_clauses)
 
     # Get the final list of text_ids containing all hashes:
     text_ids_query = f"""
-        WITH {cte_string}
-            SELECT DISTINCT text_id
-            FROM final_result
+        WITH
+            {cte_string}
+
+            {final_intersect}
     """
+
+    # print(text_ids_query, flush=True)
 
     try:
         text_ids_result = duckdb_connection.execute(text_ids_query).fetchall()
@@ -204,18 +209,18 @@ def twiga_index_reader(
 
 def twiga_single_word_searcher(
     duckdb_connection: object,
-    hash_table:        pa.Table,
+    index_bins:        int,
+    request_hash:      str,
     results_number:    int
 ) -> None | pa.Table:
     """
     Find texts containing consecutive word sequences (phrase matching).
 
     Args:
-        results_number: Maximum results to return. Use 0 for unlimited results.
+        results_number: Maximum results to return.
     """
 
-    # Build LIMIT clause only if results_number > 0:
-    limit_clause = f'LIMIT {str(results_number)}' if results_number > 0 else ''
+    bin_number = (int(request_hash, 16) % index_bins) + 1
 
     search_query = f"""
         SELECT
@@ -226,12 +231,13 @@ def twiga_single_word_searcher(
                 (matching_words / FIRST(wc.words_total)), 5
             ) AS matching_words_frequency
         FROM
-            hash_table AS ht
+            bin_{bin_number} AS ht
             LEFT JOIN word_counts AS wc
                 ON wc.text_id = ht.text_id
+        WHERE ht.hash = '{request_hash}'
         GROUP BY ht.text_id
         ORDER BY matching_words_frequency DESC
-        {limit_clause}
+        LIMIT {str(results_number)}
     """
 
     result_table = duckdb_connection.sql(search_query).fetch_arrow_table()
@@ -252,13 +258,8 @@ def twiga_any_position_searcher(
     Find texts containing words in any order.
 
     Args:
-        results_number: Maximum results to return. Use 0 for unlimited results.
+        results_number: Maximum results to return.
     """
-
-    # Build LIMIT clause only if results_number > 0:
-    limit_clause = f'LIMIT {str(results_number)}' if results_number > 0 else ''
-
-    request_sequence_string = ''.join(map(str, hash_id_list))
 
     search_query = f"""
         WITH
@@ -285,7 +286,7 @@ def twiga_any_position_searcher(
                 ON wc.text_id = p.text_id
         GROUP BY p.text_id
         ORDER BY matching_words_frequency DESC
-        {limit_clause}
+        LIMIT {str(results_number)}
     """
 
     result_table = duckdb_connection.sql(search_query).fetch_arrow_table()
@@ -306,11 +307,8 @@ def twiga_exact_phrase_searcher(
     Find texts containing consecutive word sequences (phrase matching).
 
     Args:
-        results_number: Maximum results to return. Use 0 for unlimited results.
+        results_number: Maximum results to return.
     """
-
-    # Build LIMIT clause only if results_number > 0:
-    limit_clause = f'LIMIT {str(results_number)}' if results_number > 0 else ''
 
     # Build request sequence with delimiter to avoid ambiguity
     # (e.g., "01" vs "0,1"):
@@ -370,7 +368,7 @@ def twiga_exact_phrase_searcher(
         WHERE sbt.sequence = '{request_sequence_string}'
         GROUP BY sbt.text_id
         ORDER BY matching_words_frequency DESC
-        {limit_clause}
+        LIMIT {str(results_number)}
     """
 
     result_table = duckdb_connection.sql(search_query).fetch_arrow_table()

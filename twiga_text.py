@@ -9,7 +9,7 @@ def twiga_text_writer(
     text_bins:         int,
     batch_table:       pa.Table
 ) -> bool:
-    """Write texts to sharded bins based on text_id modulo distribution."""
+    """Writes texts to sharded bins based on text_id modulo distribution."""
 
     # Partition rows by bin:
     text_ids = batch_table.column('text_id').to_pylist()
@@ -44,7 +44,7 @@ def twiga_text_reader(
     text_bins:         int,
     text_id_table:     pa.Table
 ) -> None | pa.Table:
-    """Retrieve texts from sharded bins and join with search metadata."""
+    """Retrieves texts from sharded bins and joins them with search results."""
 
     text_id_list = text_id_table.column('text_id').to_pylist()
 

@@ -41,19 +41,15 @@ load_dotenv(find_dotenv())
 def text_searcher(
     search_request: str,
     results_number: str,
-    search_method: str = 'exact_phrase'
+    search_method:  str = 'exact_phrase'
 ) -> tuple[dict, dict]:
     """
     Search for texts matching a search query.
 
-    This function performs lexical search across the indexed text corpus
-    using word hashing for efficient matching.
-
     Args:
         search_request: The search query containing one or more words.
         results_number: Maximum number of search results to return.
-            Use "All" or "0" for unlimited results.
-        search_method: The search method to use - either 'exact_phrase' or 'any_position'.
+        search_method: either 'exact_phrase' or 'any_position'.
             'exact_phrase' finds texts with consecutive word sequences.
             'any_position' finds texts with words in any order.
 
@@ -67,24 +63,29 @@ def text_searcher(
     global last_activity
     last_activity = time.time()
 
-    # Convert results_number to int (handle "All" option):
-    if str(results_number).lower() == 'all':
-        max_results = 0
-    else:
-        max_results = int(results_number)
-
-    # Hash the search request:
-    hash_list = twiga_request_hasher(search_request)
-
-    # Read the hashed words index data:
-    index_reading_start = time.time()
-
     # Use the global DuckDB connections:
     global duckdb_index_connection
     global duckdb_text_connection
 
+    # Start measuring the search time:
+    search_start = time.time()
+
+    # Hash the search request:
+    hash_list = twiga_request_hasher(search_request)
+
     index_bins = int(os.environ['INDEX_BINS'])
-    text_bins = int(os.environ['TEXT_BINS'])
+    text_bins  = int(os.environ['TEXT_BINS'])
+
+    text_id_table = None
+
+    # Single-word search:
+    if len(hash_list) == 1:
+        text_id_table = twiga_single_word_searcher(
+            duckdb_index_connection,
+            index_bins,
+            hash_list[0],
+            results_number
+        )
 
     hash_id_list, hash_table = twiga_index_reader(
         duckdb_index_connection,
@@ -92,39 +93,22 @@ def text_searcher(
         hash_list
     )
 
-    index_reading_time = round((time.time() - index_reading_start), 3)
-
-    # Search:
-    search_start = time.time()
-
-    text_id_table = None
-    used_search_function = None
-
+    # Multiple words search:
     if hash_table is not None:
-        # Check if it's a single-word search
-        if len(hash_id_list) == 1:
-            text_id_table = twiga_single_word_searcher(
-                duckdb_index_connection,
-                hash_table,
-                max_results
-            )
-            used_search_function = 'single_word'
-        elif search_method == 'any_position':
+        if search_method == 'any_position':
             text_id_table = twiga_any_position_searcher(
                 duckdb_index_connection,
                 hash_table,
                 hash_id_list,
-                max_results
+                results_number
             )
-            used_search_function = 'any_position'
-        else:  # default to 'exact_phrase'
+        else:
             text_id_table = twiga_exact_phrase_searcher(
                 duckdb_index_connection,
                 hash_table,
                 hash_id_list,
-                max_results
+                results_number
             )
-            used_search_function = 'exact_phrase'
 
     search_time = round((time.time() - search_start), 3)
 
@@ -156,35 +140,19 @@ def text_searcher(
             search_result[str(index)] = element
 
     text_extraction_time = round((time.time() - text_extraction_start), 3)
-
-    total_time = round(
-        (
-            index_reading_time   +
-            search_time          +
-            text_extraction_time
-        ),
-        3
-    )
+    total_time           = round((search_time + text_extraction_time), 3)
 
     info = {}
 
-    info['twiga_index_reader() ........... runtime in seconds'] = index_reading_time
-
-    if used_search_function == 'single_word':
-        info['twiga_single_word_searcher() ... runtime in seconds'] = search_time
-    elif used_search_function == 'any_position':
-        info['twiga_any_position_searcher() .. runtime in seconds'] = search_time
-    else:
-        info['twiga_exact_phrase_searcher() .. runtime in seconds'] = search_time
-
-    info['twiga_text_reader() ............ runtime in seconds'] = text_extraction_time
-    info['Twiga functions total .......... runtime in seconds'] = total_time
+    info['Index Search ..... runtime in seconds'] = search_time
+    info['Text Extraction .. runtime in seconds'] = text_extraction_time
+    info['Total ............ runtime in seconds'] = total_time
 
     return info, search_result
 
 
 def activity_inspector():
-    """Self-rescheduling timer that terminates the app after prolonged inactivity."""
+    """Self-updating timer terminating the app after prolonged inactivity."""
 
     global last_activity
 
@@ -238,9 +206,9 @@ def main():
     request_box = gr.Textbox(lines=1, label='Search Request')
 
     results_number = gr.Dropdown(
-        ['10', '20', '50', 'All'],
+        [10, 20, 50, 100],
         label='Maximum Number of Search Results',
-        value='10'
+        value=10
     )
 
     search_method_radio = gr.Radio(
