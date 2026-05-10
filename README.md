@@ -8,7 +8,7 @@ Twiga is a lexical search experiment using partitioned index of hashed words in 
 
 ## Design Objectives
 
-- [ ] Subsecond lexical search across a large number of texts
+- [x] Subsecond lexical search across a large number of texts
 
 - [x] Index data stored entirely in standard DuckDB tables
 
@@ -34,12 +34,11 @@ Located in the `data/` directory, this database contains the core index structur
 
 #### Hash Index Bin Tables (`bin_*`)
 
-The bin-sharding structure stores **low-frequency hashes** distributed across multiple tables for scalability:
+The bin-sharding structure distributes all word hashes across multiple tables for scalability:
 
 - **Table Naming**: `bin_1`, `bin_2`, ... `bin_N`
 - **Bin Assignment**: `bin_number = (int(hash_value, 16) % index_bins) + 1`
-- **Purpose**: Store low-frequency word hashes (those appearing in ≤10% of documents) with their document positions
-- **Optimization**: High-frequency hashes are moved to separate `hash_*` tables (see below)
+- **Purpose**: Store word hashes distributed by bin assignment with their document positions
 
 Each `bin_*` table contains:
 - `hash` (VARCHAR, dictionary-compressed): BLAKE2b-256 hash of the original word
@@ -51,30 +50,14 @@ Each `bin_*` table contains:
 - **Parallelism**: Multiple bins can be queried concurrently
 - **Memory Efficiency**: Smaller working sets during indexing
 - **Maintenance**: Specific bins can be rebuilt independently
-- **Query Optimization**: Separating high-frequency hashes reduces data volume in bins
+- **Cache Locality**: Tables can be reordered by hash for improved performance
 
-#### High-Frequency Hashes Tables (`hash_*`)
+#### Hash Metadata Table (`hash_metadata`)
 
-This optimization identifies and separates **high-frequency hashes** into dedicated tables.  
-A high-frequency word hash is a word hash appearing in >10% of all documents in the index.
+Metadata table created during index optimization tracking hash frequency:
 
-- **Table Naming**: `hash_<BLAKE2b_hash>` (one table per high-frequency hash)
-- **Purpose**: Store high-frequency hash occurrences separately for efficient filtering.
-- **Optimization Strategy**: High-frequency hashes are only queried after confirming a document contains all required low-frequency hashes, if any.
-
-Each `hash_*` table contains:
-- `hash` (VARCHAR): The high-frequency hash value
-- `text_id` (INTEGER): Reference to source document
-- `positions` (INTEGER[]): Array of word positions within the text
-
-#### High-Frequency Hashes Metadata Table (`high_frequency_hashes`)
-
-Metadata table tracking all high-frequency hashes identified during optimization:
-
-- `hash` (VARCHAR PRIMARY KEY): The high-frequency hash
+- `hash` (VARCHAR PRIMARY KEY): The word hash value
 - `document_count` (INTEGER): Number of documents containing this hash
-- `document_percentage` (DOUBLE): Percentage of total documents containing this hash
-- `table_name` (VARCHAR): Name of the corresponding `hash_*` table
 
 ### Text Database (`twiga_texts.duckdb`)
 
@@ -96,14 +79,12 @@ Example: 3 100 860 texts having a total of 1 521 483 534 non-unique words were i
 
 #### Search Process (`twiga_core_search.py`)
 
-Implements a two-tier search strategy optimized for mixed-frequency queries:
+Implements lexical search across the bin-sharded index:
 
 1. **Request Hashing**: Normalize, tokenize, and hash search terms (same as indexing)
-2. **Hash Classification**: Separate search hashes into low-frequency (from bins) and high-frequency (from `hash_*` tables)
-3. **Low-Frequency Query**: Query relevant `bin_*` tables for all low-frequency search hashes
-4. **Document Filtering**: Identify documents containing ALL required low-frequency hashes
-5. **High-Frequency Query**: Query `hash_*` tables only for high-frequency hashes in qualifying documents (if any)
-6. **Result Assembly**: Combine low and high-frequency results, maintaining original request order
+2. **Hash Lookup**: Query relevant `bin_*` tables containing the search hashes
+3. **Document Identification**: Identify documents containing ALL search hashes
+4. **Result Assembly**: Return matching document IDs, optionally ordered by relevance
 
 ### Performance Characteristics
 
@@ -113,21 +94,17 @@ Implements a two-tier search strategy optimized for mixed-frequency queries:
 - Multiple threads write to different bins with no contention
 
 **Query Performance:**
-- Two-tier strategy minimizes data scanned for high-frequency terms
-- Low-frequency hashes narrow document set before querying high-frequency tables
-- High-frequency hash queries benefit from dedicated, smaller tables
-- UNION queries combine results efficiently
-- Hash mapping optimizes result ordering
+- Bin-sharding distributes data, reducing per-table size
+- Hash lookup uses relevant `bin_*` tables to find documents
+- Reordered tables maintain hash locality for better cache efficiency
+- UNION queries combine results from multiple bins efficiently
 
 **Optimization Process (`twiga_index_optimizer.py`):**
-1. Analyzes hash distribution across all documents
-2. Identifies high-frequency hashes (>10% document coverage)
-3. Creates dedicated `hash_*` tables for each high-frequency hash
-4. Generates `high_frequency_hashes` metadata table
-5. Removes high-frequency entries from bin tables
-6. Reorders remaining bin tables by hash for cache locality
+1. Analyzes hash frequency across all documents
+2. Creates `hash_metadata` table recording document count for each hash
+3. Reorders all `bin_*` tables by hash and text_id for improved cache locality
 
-Example: Optimization of an index with 3 100 860 text items and a total of 1 521 483 534 non-unique words took 1 hour 48 minutes 25 seconds.
+Example: Optimization of an index with 3,100,860 text items and a total of 1,521,483,534 non-unique words took 1 hour 48 minutes 25 seconds.
 
 ## Word Definition
 
@@ -157,8 +134,8 @@ Twiga is a lexical search experiment with a focused scope having the following l
 
 These are the most important factors limiting the performance of the search architecture implemented in Twiga:
 
-- **High-Frequency Words**: Stopwords and all other high-frequency words in a search request increase significantly the search latency, especially when a search request is composed only of high-frequency words. While most search requests having 6 words or less are completed with a sub-second latency even in exact phrase mode, some search requests composed entirely of high-frequency words can take up to 4 seconds.
-- **Number of Indexed Texts**: The largest index used by Twiga has 3 100 860 text entries with a sum of 1 521 483 534 non-unique words. Larger indexes are technically possible, but they will have larger tables of high-frequency words further increasing the search latency.
+- **High-Frequency Words**: Stopwords and other high-frequency words in a search request require scanning more bin table data, increasing search latency. A search request composed entirely of high-frequency words may take longer to complete than one with mixed-frequency terms.
+- **Number of Indexed Texts**: The largest index used by Twiga has 3,100,860 text entries with a sum of 1,521,483,534 non-unique words. Larger indexes increase the total data volume across all bin tables, which can impact query performance.
 
 ## Name
 
