@@ -117,9 +117,30 @@ Twiga returns text IDs that match the following criteria:
 * **1.** They have the full set of unique words presented in the search request.
 * **2.** They have one or more sequences of words identical to the sequence of words in the search request.
 
-## Ranking Criterion
+## Ranking
 
-Matching words frequency is the ranking criterion. It is defined as the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
+Twiga uses **BM25 (Best Matching 25)** scoring for ranking search results. BM25 is a probabilistic ranking function that considers:
+
+- **Term Frequency (TF)**: How many times a search term appears in a document
+- **Inverse Document Frequency (IDF)**: How rare or common a term is across all documents
+- **Document Length Normalization**: Adjusts scores to account for document length variations
+
+BM25 formula: `IDF(term) × (TF × (k1 + 1)) / (TF + k1 × (1 - b + b × |D| / avgdl))`
+
+Where:
+- `IDF = LN((N - df + 0.5) / (df + 0.5))`
+- `N` = total number of documents
+- `df` = number of documents containing the term
+- `|D|` = document length
+- `avgdl` = average document length
+- `k1` = 1.5 (term frequency saturation parameter, configurable)
+- `b` = 0.75 (length normalization parameter, configurable)
+
+For **single-word searches**, BM25 score is calculated for that term.
+
+For **multi-word searches** (any position), BM25 scores for each matching term are summed.
+
+For **phrase searches**, the minimum document frequency across phrase terms is used as the IDF component, with phrase match count as the term frequency.
 
 ## Limitations
 
@@ -134,7 +155,7 @@ Twiga is a lexical search experiment with a focused scope having the following l
 
 These are the most important factors limiting the performance of the search architecture implemented in Twiga:
 
-- **High-Frequency Words**: Stopwords and other high-frequency words in a search request require scanning more bin table data, increasing search latency. A search request composed entirely of high-frequency words may take longer to complete than one with mixed-frequency terms.
+- **High-Frequency Words**: Stopwords and other high-frequency words in a search request require scanning larger tables and this is increasing the search latency. A search request composed entirely of high-frequency words takes longer to complete than one with mixed-frequency terms.
 - **Number of Indexed Texts**: The largest index used by Twiga has 3,100,860 text entries with a sum of 1,521,483,534 non-unique words. Larger indexes increase the total data volume across all bin tables, which can impact query performance.
 
 ## Name

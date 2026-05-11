@@ -10,7 +10,7 @@ from   tokenizers import pre_tokenizers
 
 
 def twiga_request_hasher(search_request: str) -> list:
-    """Normalize, tokenize, and hash a search request into word hashes."""
+    """Normalizes, tokenizes, and hashes a search request into word hashes."""
 
     normalizer = normalizers.Sequence(
         [
@@ -47,10 +47,10 @@ def twiga_index_reader(
     request_hash_list: list
 ) -> tuple[None, None] | tuple[list, pa.Table]:
     """
-    Look up hash entries using pairwise INTERSECT CTE statements.
+    Looks up hash entries using pairwise INTERSECT CTE statements.
 
     Creates INTERSECT CTEs for pairs of hashes ordered from highest to lowest
-    document count, then intersects all pair results together with any odd hash.
+    document count, then intersects all pair results with any odd hash.
     """
 
     if len(request_hash_list) == 0:
@@ -179,6 +179,7 @@ def twiga_index_reader(
         hash_positions_query_parts.append(f"""
             SELECT
                 {mapping_dict[hash_item]} AS hash_id,
+                '{hash_item}' AS hash,
                 text_id,
                 positions
             FROM bin_{bin_number}
@@ -211,32 +212,90 @@ def twiga_single_word_searcher(
     duckdb_connection: object,
     index_bins:        int,
     request_hash:      str,
-    results_number:    int
+    results_number:    int,
+    bm25_k1:           float = 1.5,
+    bm25_b:            float = 0.75
 ) -> None | pa.Table:
     """
-    Find texts containing consecutive word sequences (phrase matching).
+    Finds texts containing a single word with BM25 scoring.
 
     Args:
         results_number: Maximum results to return.
+        bm25_k1: BM25 tuning parameter (default 1.5).
+        bm25_b: BM25 tuning parameter (default 0.75).
     """
 
     bin_number = (int(request_hash, 16) % index_bins) + 1
 
     search_query = f"""
+        WITH
+            -- Get the average document length and the total document count:
+            stats AS (
+                SELECT
+                    AVG(words_total) AS average_document_length,
+                    COUNT(*) AS total_documents
+                FROM word_counts
+            )
+
         SELECT
-            ht.text_id,
-            LEN(FIRST(ht.positions)) AS matching_words,
-            FIRST(wc.words_total) AS words_total,
+            hash_index_table.text_id,
             ROUND(
-                (matching_words / FIRST(wc.words_total)), 5
-            ) AS matching_words_frequency
+                LN(
+                    (
+                        FIRST(stats.total_documents)
+                        -
+                        FIRST(hash_metadata_table.document_count)
+                        +
+                        0.5
+                    )
+                    /
+                    (
+                        FIRST(hash_metadata_table.document_count)
+                        +
+                        0.5
+                    )
+                )
+                *
+                (
+                    LEN(FIRST(hash_index_table.positions))
+                    *
+                    (
+                        {bm25_k1}
+                        +
+                        1
+                    )
+                )
+                /
+                (
+                    LEN(FIRST(hash_index_table.positions))
+                    +
+                    {bm25_k1}
+                    *
+                    (
+                        1
+                        -
+                        {bm25_b}
+                        +
+                        {bm25_b}
+                        *
+                        FIRST(word_counts_table.words_total)
+                        /
+                        FIRST(stats.average_document_length)
+                    )
+                ),
+                3
+            ) AS bm25_score,
+            LEN(FIRST(hash_index_table.positions)) AS matching_words,
         FROM
-            bin_{bin_number} AS ht
-            LEFT JOIN word_counts AS wc
-                ON wc.text_id = ht.text_id
-        WHERE ht.hash = '{request_hash}'
-        GROUP BY ht.text_id
-        ORDER BY matching_words_frequency DESC
+            bin_{bin_number} AS hash_index_table
+            LEFT JOIN word_counts AS word_counts_table
+                ON word_counts_table.text_id = hash_index_table.text_id
+            LEFT JOIN hash_metadata AS hash_metadata_table
+                ON hash_metadata_table.hash = '{request_hash}'
+            CROSS JOIN stats
+        WHERE hash_index_table.hash = '{request_hash}'
+        GROUP BY hash_index_table.text_id
+        ORDER BY bm25_score DESC
         LIMIT {str(results_number)}
     """
 
@@ -252,40 +311,106 @@ def twiga_any_position_searcher(
     duckdb_connection: object,
     hash_table:        pa.Table,
     hash_id_list:      list,
-    results_number:    int
+    results_number:    int,
+    bm25_k1:           float = 1.5,
+    bm25_b:            float = 0.75
 ) -> None | pa.Table:
     """
-    Find texts containing words in any order.
+    Finds texts containing words in any order with BM25 scoring.
 
     Args:
         results_number: Maximum results to return.
+        bm25_k1: BM25 tuning parameter (default 1.5).
+        bm25_b:  BM25 tuning parameter (default 0.75).
     """
 
     search_query = f"""
         WITH
-            -- Count the number of positions:
+            -- Get the average document length and the total document count:
+            stats AS (
+                SELECT
+                    AVG(words_total) AS average_document_length,
+                    COUNT(*) AS total_documents
+                FROM word_counts
+            ),
+
+            -- Get the term frequency for each hash in each text:
             positions AS (
                 SELECT
                     hash_id,
+                    hash,
                     text_id,
-                    LENGTH(positions) AS positions_number
+                    LENGTH(positions) AS term_frequency
                 FROM hash_table
-            )
+            ),
 
-        -- Score texts by total number of matching words:
+            -- Calculate the BM25 scores for each term in each text:
+            bm25_scores AS (
+                SELECT
+                    positions.text_id,
+                    positions.hash_id,
+                    ROUND(
+                        LN(
+                            (
+                                stats.total_documents
+                                -
+                                hash_metadata_table.document_count
+                                +
+                                0.5
+                            )
+                            /
+                            (
+                                hash_metadata_table.document_count
+                                +
+                                0.5
+                            )
+                        )
+                        *
+                        (
+                            positions.term_frequency
+                            *
+                            (
+                                {bm25_k1}
+                                +
+                                1
+                            )
+                        )
+                        /
+                        (
+                            positions.term_frequency + {bm25_k1}
+                            *
+                            (
+                                1
+                                -
+                                {bm25_b}
+                                +
+                                {bm25_b}
+                                *
+                                word_counts_table.words_total
+                                /
+                                stats.average_document_length
+                            )
+                        ),
+                        3
+                    ) AS bm25_term_score
+                FROM
+                    positions
+                    LEFT JOIN hash_metadata AS hash_metadata_table
+                        ON hash_metadata_table.hash = positions.hash
+                    LEFT JOIN word_counts AS word_counts_table
+                        ON word_counts_table.text_id = positions.text_id
+                    CROSS JOIN stats
+            )
         SELECT
-            p.text_id,
-            SUM(p.positions_number) AS matching_words,
-            FIRST(wc.words_total) AS words_total,
-            ROUND(
-                (matching_words / FIRST(wc.words_total)), 5
-            ) AS matching_words_frequency
+            bm25_scores.text_id,
+            SUM(bm25_term_score) AS bm25_score,
+            COUNT(DISTINCT hash_id) AS matching_words
         FROM
-            positions AS p
-            LEFT JOIN word_counts AS wc
-                ON wc.text_id = p.text_id
-        GROUP BY p.text_id
-        ORDER BY matching_words_frequency DESC
+            bm25_scores
+            LEFT JOIN word_counts AS word_counts_table
+                ON word_counts_table.text_id = bm25_scores.text_id
+        GROUP BY bm25_scores.text_id
+        ORDER BY bm25_score DESC
         LIMIT {str(results_number)}
     """
 
@@ -301,13 +426,17 @@ def twiga_exact_phrase_searcher(
     duckdb_connection: object,
     hash_table:        pa.Table,
     hash_id_list:      list,
-    results_number:    int
+    results_number:    int,
+    bm25_k1:           float = 1.5,
+    bm25_b:            float = 0.75
 ) -> None | pa.Table:
     """
-    Find texts containing consecutive word sequences (phrase matching).
+    Finds texts containing consecutive word sequences with BM25 scoring.
 
     Args:
         results_number: Maximum results to return.
+        bm25_k1: BM25 tuning parameter (default 1.5).
+        bm25_b:  BM25 tuning parameter (default 0.75).
     """
 
     # Build request sequence with delimiter to avoid ambiguity
@@ -316,10 +445,19 @@ def twiga_exact_phrase_searcher(
 
     search_query = f"""
         WITH
-            -- Flatten position arrays into individual rows:
+            -- Get the average document length and the total document count:
+            stats AS (
+                SELECT
+                    AVG(words_total) AS average_document_length,
+                    COUNT(*) AS total_documents
+                FROM word_counts
+            ),
+
+            -- Flatten all position arrays into individual rows:
             positions AS (
                 SELECT
                     hash_id,
+                    hash,
                     text_id,
                     UNNEST(positions) AS position
                 FROM hash_table
@@ -351,23 +489,80 @@ def twiga_exact_phrase_searcher(
                     text_id,
                     sequence_id
                 HAVING COUNT(hash_id) = {str(len(hash_id_list))}
+            ),
+
+            -- Get the minimum document frequency for the terms in the phrase:
+            phrase_document_frequency AS (
+                SELECT MIN(hash_metadata_table.document_count) AS value
+                FROM
+                    positions
+                    LEFT JOIN hash_metadata AS hash_metadata_table
+                        ON hash_metadata_table.hash = positions.hash
             )
 
-        -- Match sequences containing the search pattern:
+        -- Match all sequences containing the search pattern:
         SELECT
-            sbt.text_id,
-            COUNT(sbt.sequence) * {str(len(hash_id_list))} AS matching_words,
-            FIRST(wc.words_total) AS words_total,
+            sequences_by_text.text_id,
             ROUND(
-                (matching_words / FIRST(wc.words_total)), 5
-            ) AS matching_words_frequency
+                LN(
+                    (
+                        FIRST(stats.total_documents)
+                        -
+                        FIRST(phrase_document_frequency.value)
+                        +
+                        0.5
+                    )
+                    /
+                    (
+                        FIRST(phrase_document_frequency.value)
+                        +
+                        0.5
+                    )
+                )
+                *
+                (
+                    COUNT(sequences_by_text.sequence)
+                    *
+                    (
+                        {bm25_k1}
+                        +
+                        1
+                    )
+                )
+                /
+                (
+                    COUNT(sequences_by_text.sequence)
+                    +
+                    {bm25_k1}
+                    *
+                    (
+                        1
+                        -
+                        {bm25_b}
+                        +
+                        {bm25_b}
+                        *
+                        FIRST(word_counts_table.words_total)
+                        /
+                        FIRST(stats.average_document_length)
+                    )
+                ),
+                3
+            ) AS bm25_score,
+            COUNT(
+                sequences_by_text.sequence)
+                *
+                {str(len(hash_id_list))}
+            AS matching_words
         FROM
-            sequences_by_text AS sbt
-            LEFT JOIN word_counts AS wc
-                ON wc.text_id = sbt.text_id
-        WHERE sbt.sequence = '{request_sequence_string}'
-        GROUP BY sbt.text_id
-        ORDER BY matching_words_frequency DESC
+            sequences_by_text
+            LEFT JOIN word_counts AS word_counts_table
+                ON word_counts_table.text_id = sequences_by_text.text_id
+            CROSS JOIN stats
+            CROSS JOIN phrase_document_frequency
+        WHERE sequences_by_text.sequence = '{request_sequence_string}'
+        GROUP BY sequences_by_text.text_id
+        ORDER BY bm25_score DESC
         LIMIT {str(results_number)}
     """
 

@@ -144,9 +144,9 @@ def text_searcher(
 
     info = {}
 
-    info['Index Search ..... runtime in seconds'] = search_time
-    info['Text Extraction .. runtime in seconds'] = text_extraction_time
-    info['Total ............ runtime in seconds'] = total_time
+    info['Index Searching runtime in seconds'] = search_time
+    info['Text Reading .. runtime in seconds'] = text_extraction_time
+    info['Total ......... runtime in seconds'] = total_time
 
     return info, search_result
 

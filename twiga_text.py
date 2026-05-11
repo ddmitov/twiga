@@ -78,16 +78,15 @@ def twiga_text_reader(
     search_result_table = duckdb_connection.query(
         """
             SELECT
+                tit.bm25_score,
                 tit.matching_words,
-                tit.words_total AS total_words,
-                tit.matching_words_frequency,
                 tt.* EXCLUDE (text),
                 tt.text
             FROM
                 text_id_table AS tit
                 LEFT JOIN final_text_table AS tt
                     ON tt.text_id = tit.text_id
-            ORDER BY tit.matching_words_frequency DESC
+            ORDER BY tit.bm25_score DESC
         """
     ).fetch_arrow_table()
 
