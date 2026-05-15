@@ -47,10 +47,12 @@ def twiga_index_reader(
     request_hash_list: list
 ) -> tuple[None, None] | tuple[list, pa.Table]:
     """
-    Looks up hash entries using pairwise INTERSECT CTE statements.
+    Looks up hash entries using INTERSECT statement.
 
-    Creates INTERSECT CTEs for pairs of hashes ordered from highest to lowest
-    document count, then intersects all pair results with any odd hash.
+    Creates INTERSECT statement of hashes
+    ordered from lowest to highest document count
+    in order to extract only text_ids where all hashes match
+    in the minimal amount of time.
     """
 
     if len(request_hash_list) == 0:
@@ -59,16 +61,9 @@ def twiga_index_reader(
     # Get unique hashes only:
     hash_set = set(request_hash_list)
 
-    # Create a mapping of each hash to its index in the original request:
-    mapping_dict = {
-        hash_item: index for index, hash_item in enumerate(hash_set)
-    }
-
-    # Get document counts for all hashes from the hash_metadata table:
-    hash_doc_count_query = f"""
-        SELECT
-            hash,
-            document_count
+    # Get all unique hashes in the search request, ordered by document count:
+    hashes_query = f"""
+        SELECT hash
         FROM hash_metadata
         WHERE hash IN (
             {','.join(repr(hash_item) for hash_item in hash_set)}
@@ -76,97 +71,47 @@ def twiga_index_reader(
         ORDER BY document_count ASC
     """
 
-    hash_doc_counts = duckdb_connection.execute(
-        hash_doc_count_query
-    ).fetchall()
+    hashes_result = duckdb_connection.execute(hashes_query).fetchall()
 
-    # Create a dict of hash -> document_count:
-    hash_counts_dict = {row[0]: row[1] for row in hash_doc_counts}
+    # Create a hash list - alredy ordered by document count from the query:
+    hashes_list = [row[0] for row in hashes_result]
 
-    # Sort hashes by document count (lowest first):
-    sorted_hashes = sorted(
-        hash_set,
-        key=lambda hash_item: hash_counts_dict.get(hash_item, float('inf'))
-    )
+    # Build INTERSECT statement:
+    intersect_sql = ''
+    hash_index    = 0
 
-    # Reverse to process pairs from highest to lowest document count:
-    sorted_hashes_reversed = sorted_hashes[::-1]
+    for hash_item in hashes_list:
+        hash_index += 1
+        bin_number = (int(hash_item, 16) % index_bins) + 1
 
-    # Build pairwise INTERSECT CTEs:
-    cte_clauses = []
-    pair_index = 0
-    odd_hash_cte = None
+        # Formatting of the SQL queries is adapted for readability if printed.
+        if hash_index < len(hashes_list):
+            select_statement = f"""
+            SELECT text_id
+            FROM bin_{bin_number}
+            WHERE hash = '{hash_item}'
+            INTERSECT"""
 
-    # Process hashes in pairs from highest to lowest:
-    for hash_index in range(0, len(sorted_hashes_reversed), 2):
-        hash_item_1  = sorted_hashes_reversed[hash_index]
-        bin_number_1 = (int(hash_item_1, 16) % index_bins) + 1
-
-        if hash_index + 1 < len(sorted_hashes_reversed):
-            # Hash pair:
-            hash_item_2  = sorted_hashes_reversed[hash_index + 1]
-            bin_number_2 = (int(hash_item_2, 16) % index_bins) + 1
-
-            pair_cte = f"""pair_{pair_index} AS (
-                SELECT text_id
-                FROM bin_{bin_number_1}
-                WHERE hash = '{hash_item_1}'
-                INTERSECT
-                SELECT text_id
-                FROM bin_{bin_number_2}
-                WHERE hash = '{hash_item_2}'
-            )"""
-
-            cte_clauses.append(pair_cte)
-            pair_index += 1
+            intersect_sql += select_statement
         else:
-            # Odd hash - no pair:
-            odd_hash_cte = f"""odd_hash AS (
-                SELECT text_id
-                FROM bin_{bin_number_1}
-                WHERE hash = '{hash_item_1}'
-            )"""
-            cte_clauses.append(odd_hash_cte)
+            # Final hash:
+            select_statement = f"""
+            SELECT text_id
+            FROM bin_{bin_number}
+            WHERE hash = '{hash_item}'
+            """
 
-    # Build the final INTERSECT combining all pairs and odd hash:
-    # Formatting of the SQL query is adapted for readability if printed.
-    intersect_parts = [
-        f"""SELECT text_id
-            FROM pair_{hash_index}"""
-        for hash_index in range(pair_index)
-    ]
+            intersect_sql += select_statement
 
-    if odd_hash_cte is not None:
-        intersect_parts.append(
-            """SELECT text_id
-            FROM odd_hash"""
-        )
-
-    final_intersect = """
-            INTERSECT
-            """.join(intersect_parts)
-
-    # Build the full query with CTEs:
-    cte_string = ", ".join(cte_clauses)
-
-    # Get the final list of text_ids containing all hashes:
-    text_ids_query = f"""
-        WITH
-            {cte_string}
-
-            {final_intersect}
-    """
-
-    # print(text_ids_query, flush=True)
+    # print(intersect_sql, flush=True)
 
     try:
-        text_ids_result = duckdb_connection.execute(text_ids_query).fetchall()
-        text_ids_list = [row[0] for row in text_ids_result]
+        text_ids_table = duckdb_connection.execute(
+            intersect_sql
+        ).fetch_arrow_table()
 
-        if len(text_ids_list) == 0:
+        if text_ids_table.num_rows == 0:
             return None, None
-
-        text_ids_str = ','.join(str(text_id) for text_id in text_ids_list)
 
     except Exception as e:
         return None, None
@@ -174,22 +119,28 @@ def twiga_index_reader(
     # Now extract hash positions for all hashes in the filtered text_ids:
     hash_positions_query_parts = []
 
-    for hash_item in sorted_hashes:
+    for hash_item in hashes_list:
         bin_number = (int(hash_item, 16) % index_bins) + 1
+
         hash_positions_query_parts.append(f"""
             SELECT
-                {mapping_dict[hash_item]} AS hash_id,
-                '{hash_item}' AS hash,
-                text_id,
-                positions
-            FROM bin_{bin_number}
-            WHERE
-                hash = '{hash_item}'
-                AND text_id IN ({text_ids_str})
+                b.hash,
+                b.text_id,
+                b.positions
+            FROM
+                bin_{bin_number} AS b
+                INNER JOIN text_ids_table AS tit
+                    ON tit.text_id = b.text_id
+            WHERE b.hash = '{hash_item}'
         """)
 
-    # Combine all queries with UNION:
-    hash_positions_query = ' UNION '.join(hash_positions_query_parts)
+    # Combine all SELECT statements with UNION:
+    # Formatting of the SQL query is adapted for readability if printed.
+    hash_positions_query = '    UNION '.join(hash_positions_query_parts)
+
+    # print(hash_positions_query, flush=True)
+
+    hash_table = None
 
     try:
         hash_table = duckdb_connection.sql(
@@ -202,10 +153,7 @@ def twiga_index_reader(
     except Exception as e:
         return None, None
 
-    # Reconstruct the list of hash IDs in the order of the original request:
-    hash_id_list = [mapping_dict[hash_item] for hash_item in request_hash_list]
-
-    return hash_id_list, hash_table
+    return request_hash_list, hash_table
 
 
 def twiga_single_word_searcher(
@@ -310,7 +258,7 @@ def twiga_single_word_searcher(
 def twiga_any_position_searcher(
     duckdb_connection: object,
     hash_table:        pa.Table,
-    hash_id_list:      list,
+    request_hash_list: list,
     results_number:    int,
     bm25_k1:           float = 1.5,
     bm25_b:            float = 0.75
@@ -337,7 +285,6 @@ def twiga_any_position_searcher(
             -- Get the term frequency for each hash in each text:
             positions AS (
                 SELECT
-                    hash_id,
                     hash,
                     text_id,
                     LENGTH(positions) AS term_frequency
@@ -348,7 +295,7 @@ def twiga_any_position_searcher(
             bm25_scores AS (
                 SELECT
                     positions.text_id,
-                    positions.hash_id,
+                    positions.hash,
                     ROUND(
                         LN(
                             (
@@ -404,7 +351,7 @@ def twiga_any_position_searcher(
         SELECT
             bm25_scores.text_id,
             SUM(bm25_term_score) AS bm25_score,
-            COUNT(DISTINCT hash_id) AS matching_words
+            COUNT(DISTINCT hash) AS matching_words
         FROM
             bm25_scores
             LEFT JOIN word_counts AS word_counts_table
@@ -425,7 +372,7 @@ def twiga_any_position_searcher(
 def twiga_exact_phrase_searcher(
     duckdb_connection: object,
     hash_table:        pa.Table,
-    hash_id_list:      list,
+    request_hash_list: list,
     results_number:    int,
     bm25_k1:           float = 1.5,
     bm25_b:            float = 0.75
@@ -439,9 +386,12 @@ def twiga_exact_phrase_searcher(
         bm25_b:  BM25 tuning parameter (default 0.75).
     """
 
-    # Build request sequence with delimiter to avoid ambiguity
-    # (e.g., "01" vs "0,1"):
-    request_sequence_string = ','.join(map(str, hash_id_list))
+    # Build the VALUES rows for phrase_pattern from request_hash_list.
+    # Each row is of phrase_offset and expected_hash.
+    phrase_pattern_values = ', '.join(
+        f"({offset}, '{hash_item}')"
+        for offset, hash_item in enumerate(request_hash_list)
+    )
 
     search_query = f"""
         WITH
@@ -456,48 +406,48 @@ def twiga_exact_phrase_searcher(
             -- Flatten all position arrays into individual rows:
             positions AS (
                 SELECT
-                    hash_id,
                     hash,
                     text_id,
                     UNNEST(positions) AS position
                 FROM hash_table
             ),
 
-            -- Define sequence groups using ROW_NUMBER().
-            -- ROW_NUMBER() - position is constant for consecutive positions:
+            -- Compose the phrase pattern as a table,
+            -- one row per (phrase_offset, expected_hash):
+            phrase_pattern (phrase_offset, expected_hash) AS (
+                VALUES {phrase_pattern_values}
+            ),
+ 
+            -- Self-join each indexed (text_id, hash, position)
+            -- against every phrase slot it could occupy,
+            -- normalising position into sequence_id:
             sequences AS (
                 SELECT
-                    text_id,
-                    hash_id,
-                    position,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY text_id
-                        ORDER BY position ASC
-                    ) - position AS sequence_id
-                FROM positions
+                    pos.text_id,
+                    pos.position - pp.phrase_offset AS sequence_id
+                FROM positions AS pos
+                JOIN phrase_pattern AS pp
+                    ON pp.expected_hash = pos.hash
             ),
-
-            -- Build sequence strings for every sequence using delimiter:
+ 
+            -- A real phrase match contributes one row per phrase slot,
+            -- all sharing the same sequence_id.
             sequences_by_text AS (
                 SELECT
                     text_id,
-                    STRING_AGG(
-                        CAST(hash_id AS VARCHAR), ',' ORDER BY position
-                    ) AS sequence
+                    sequence_id
                 FROM sequences
                 GROUP BY
                     text_id,
                     sequence_id
-                HAVING COUNT(hash_id) = {str(len(hash_id_list))}
+                HAVING COUNT(*) = {len(request_hash_list)}
             ),
 
             -- Get the minimum document frequency for the terms in the phrase:
             phrase_document_frequency AS (
-                SELECT MIN(hash_metadata_table.document_count) AS value
-                FROM
-                    positions
-                    LEFT JOIN hash_metadata AS hash_metadata_table
-                        ON hash_metadata_table.hash = positions.hash
+                SELECT MIN(document_count) AS value
+                FROM hash_metadata
+                WHERE hash IN (SELECT DISTINCT hash FROM hash_table)
             )
 
         -- Match all sequences containing the search pattern:
@@ -521,7 +471,7 @@ def twiga_exact_phrase_searcher(
                 )
                 *
                 (
-                    COUNT(sequences_by_text.sequence)
+                    COUNT(sequences_by_text.sequence_id)
                     *
                     (
                         {bm25_k1}
@@ -531,7 +481,7 @@ def twiga_exact_phrase_searcher(
                 )
                 /
                 (
-                    COUNT(sequences_by_text.sequence)
+                    COUNT(sequences_by_text.sequence_id)
                     +
                     {bm25_k1}
                     *
@@ -550,9 +500,9 @@ def twiga_exact_phrase_searcher(
                 3
             ) AS bm25_score,
             COUNT(
-                sequences_by_text.sequence)
+                sequences_by_text.sequence_id)
                 *
-                {str(len(hash_id_list))}
+                {str(len(request_hash_list))}
             AS matching_words
         FROM
             sequences_by_text
@@ -560,7 +510,6 @@ def twiga_exact_phrase_searcher(
                 ON word_counts_table.text_id = sequences_by_text.text_id
             CROSS JOIN stats
             CROSS JOIN phrase_document_frequency
-        WHERE sequences_by_text.sequence = '{request_sequence_string}'
         GROUP BY sequences_by_text.text_id
         ORDER BY bm25_score DESC
         LIMIT {str(results_number)}
